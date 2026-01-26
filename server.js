@@ -244,7 +244,7 @@ app.post('/api/auth/login', async (req, res) => {
                 name: dentista.name 
             },
             JWT_SECRET,
-            { expiresIn: '7d' }
+            { expiresIn: '1y' }
         );
 
         res.json({

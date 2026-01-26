@@ -1,13 +1,13 @@
 {
   "name": "backend-dentista-pro",
-  "version": "2.0.0",
-  "description": "Backend completo para sistema de gestão odontológica",
+  "version": "3.0.0",
+  "description": "Backend completo com PostgreSQL para sistema de gestão odontológica",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js"
   },
-  "keywords": ["dentista", "gestao", "nfse"],
+  "keywords": ["dentista", "gestao", "nfse", "postgresql"],
   "author": "JOs",
   "license": "MIT",
   "dependencies": {
@@ -15,7 +15,8 @@
     "cors": "^2.8.5",
     "dotenv": "^16.0.3",
     "bcrypt": "^5.1.1",
-    "jsonwebtoken": "^9.0.2"
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.11.3"
   },
   "engines": {
     "node": ">=18.0.0"

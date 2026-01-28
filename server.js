@@ -359,6 +359,12 @@ app.post('/api/auth/login', async (req, res) => {
         }
 
         const dentista = result.rows[0];
+        
+        // DEBUG - ver o que vem do banco
+        console.log('Login tentativa:', email);
+        console.log('Campos do dentista:', Object.keys(dentista));
+        console.log('active:', dentista.active, 'ativo:', dentista.ativo);
+        
         if (!dentista.password) {
             return res.status(401).json({ success: false, erro: 'Email ou senha incorretos' });
         }
@@ -367,7 +373,8 @@ app.post('/api/auth/login', async (req, res) => {
             return res.status(401).json({ success: false, erro: 'Email ou senha incorretos' });
         }
 
-        if (!dentista.ativo) {
+        // Verificar se conta está desativada
+        if (dentista.active === false || dentista.ativo === false) {
             return res.status(403).json({ success: false, erro: 'Conta desativada' });
         }
 

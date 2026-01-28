@@ -338,7 +338,7 @@ app.post('/api/auth/register', async (req, res) => {
         res.status(201).json({
             success: true,
             message: 'Cadastro realizado com sucesso!',
-            dentista: { id: result.rows[0].id.toString(), nome: result.rows[0].nome, email: result.rows[0].email }
+            dentista: { id: result.rows[0].id.toString(), nome: result.rows[0].name, email: result.rows[0].email }
         });
     } catch (error) {
         console.error('Erro registro:', error);
@@ -406,19 +406,22 @@ app.post('/api/auth/login', async (req, res) => {
 
 app.get('/api/auth/verify', authMiddleware, async (req, res) => {
     try {
+        console.log('Verify - user id:', req.user.id);
         const result = await pool.query(
             'SELECT id, name, cro, email, clinic, specialty, plano FROM dentistas WHERE id = $1',
             [parseInt(req.user.id)]
         );
+        console.log('Verify - encontrou:', result.rows.length, 'registros');
         if (result.rows.length === 0) {
             return res.status(404).json({ success: false, erro: 'Usuário não encontrado' });
         }
         const d = result.rows[0];
         res.json({
             success: true,
-            dentista: { id: d.id.toString(), nome: d.name, cro: d.cro, email: d.email, clinica: d.clinic, especialidade: d.specialty, plano: d.plano }
+            dentista: { id: d.id.toString(), nome: d.name, cro: d.cro, email: d.email, clinica: d.clinic, especialidade: d.specialty, plano: d.plano || 'premium' }
         });
     } catch (error) {
+        console.error('Erro verify:', error);
         res.status(500).json({ success: false, erro: 'Erro interno' });
     }
 });

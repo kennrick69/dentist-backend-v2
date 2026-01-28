@@ -195,6 +195,11 @@ async function initDatabase() {
                 icone VARCHAR(10) DEFAULT '🦷',
                 foto TEXT,
                 cor VARCHAR(20) DEFAULT '#2d7a5f',
+                intervalo_minutos INTEGER DEFAULT 30,
+                hora_entrada TIME DEFAULT '08:00',
+                hora_saida TIME DEFAULT '18:00',
+                almoco_inicio TIME DEFAULT '12:00',
+                almoco_fim TIME DEFAULT '13:00',
                 ativo BOOLEAN DEFAULT true,
                 criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -243,7 +248,13 @@ async function initDatabase() {
             'ALTER TABLE pacientes ADD COLUMN IF NOT EXISTS passaporte VARCHAR(50)',
             'ALTER TABLE pacientes ADD COLUMN IF NOT EXISTS pais VARCHAR(100)',
             'ALTER TABLE pacientes ADD COLUMN IF NOT EXISTS nacionalidade VARCHAR(100)',
-            'ALTER TABLE pacientes ADD COLUMN IF NOT EXISTS tipo_documento VARCHAR(20) DEFAULT \'cpf\''
+            'ALTER TABLE pacientes ADD COLUMN IF NOT EXISTS tipo_documento VARCHAR(20) DEFAULT \'cpf\'',
+            // Campos de configuração do profissional
+            'ALTER TABLE profissionais ADD COLUMN IF NOT EXISTS intervalo_minutos INTEGER DEFAULT 30',
+            'ALTER TABLE profissionais ADD COLUMN IF NOT EXISTS hora_entrada TIME DEFAULT \'08:00\'',
+            'ALTER TABLE profissionais ADD COLUMN IF NOT EXISTS hora_saida TIME DEFAULT \'18:00\'',
+            'ALTER TABLE profissionais ADD COLUMN IF NOT EXISTS almoco_inicio TIME DEFAULT \'12:00\'',
+            'ALTER TABLE profissionais ADD COLUMN IF NOT EXISTS almoco_fim TIME DEFAULT \'13:00\''
         ];
 
         for (const query of alterQueries) {
@@ -446,7 +457,12 @@ app.get('/api/dentistas', authMiddleware, async (req, res) => {
             especialidade: p.especialidade,
             icone: p.icone,
             foto: p.foto,
-            cor: p.cor
+            cor: p.cor,
+            intervalo_minutos: p.intervalo_minutos || 30,
+            hora_entrada: p.hora_entrada ? p.hora_entrada.substring(0, 5) : '08:00',
+            hora_saida: p.hora_saida ? p.hora_saida.substring(0, 5) : '18:00',
+            almoco_inicio: p.almoco_inicio ? p.almoco_inicio.substring(0, 5) : '12:00',
+            almoco_fim: p.almoco_fim ? p.almoco_fim.substring(0, 5) : '13:00'
         }));
         
         res.json(profissionais);
@@ -476,7 +492,13 @@ app.get('/api/dentistas/:id', authMiddleware, async (req, res) => {
             cro: p.cro,
             especialidade: p.especialidade,
             icone: p.icone,
-            foto: p.foto
+            foto: p.foto,
+            cor: p.cor,
+            intervalo_minutos: p.intervalo_minutos || 30,
+            hora_entrada: p.hora_entrada ? p.hora_entrada.substring(0, 5) : '08:00',
+            hora_saida: p.hora_saida ? p.hora_saida.substring(0, 5) : '18:00',
+            almoco_inicio: p.almoco_inicio ? p.almoco_inicio.substring(0, 5) : '12:00',
+            almoco_fim: p.almoco_fim ? p.almoco_fim.substring(0, 5) : '13:00'
         });
     } catch (error) {
         console.error('Erro ao buscar profissional:', error);
@@ -487,17 +509,29 @@ app.get('/api/dentistas/:id', authMiddleware, async (req, res) => {
 // Criar profissional
 app.post('/api/dentistas', authMiddleware, async (req, res) => {
     try {
-        const { nome, cro, especialidade, icone, foto } = req.body;
+        const { nome, cro, especialidade, icone, foto, intervalo_minutos, hora_entrada, hora_saida, almoco_inicio, almoco_fim } = req.body;
         
         if (!nome) {
             return res.status(400).json({ erro: 'Nome é obrigatório' });
         }
         
         const result = await pool.query(
-            `INSERT INTO profissionais (dentista_id, nome, cro, especialidade, icone, foto) 
-             VALUES ($1, $2, $3, $4, $5, $6) 
+            `INSERT INTO profissionais (dentista_id, nome, cro, especialidade, icone, foto, intervalo_minutos, hora_entrada, hora_saida, almoco_inicio, almoco_fim) 
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) 
              RETURNING *`,
-            [parseInt(req.user.id), nome, cro || null, especialidade || 'Clínico Geral', icone || '🦷', foto || null]
+            [
+                parseInt(req.user.id), 
+                nome, 
+                cro || null, 
+                especialidade || 'Clínico Geral', 
+                icone || '🦷', 
+                foto || null,
+                intervalo_minutos || 30,
+                hora_entrada || '08:00',
+                hora_saida || '18:00',
+                almoco_inicio || '12:00',
+                almoco_fim || '13:00'
+            ]
         );
         
         const p = result.rows[0];
@@ -507,7 +541,12 @@ app.post('/api/dentistas', authMiddleware, async (req, res) => {
             cro: p.cro,
             especialidade: p.especialidade,
             icone: p.icone,
-            foto: p.foto
+            foto: p.foto,
+            intervalo_minutos: p.intervalo_minutos || 30,
+            hora_entrada: p.hora_entrada ? p.hora_entrada.substring(0, 5) : '08:00',
+            hora_saida: p.hora_saida ? p.hora_saida.substring(0, 5) : '18:00',
+            almoco_inicio: p.almoco_inicio ? p.almoco_inicio.substring(0, 5) : '12:00',
+            almoco_fim: p.almoco_fim ? p.almoco_fim.substring(0, 5) : '13:00'
         });
     } catch (error) {
         console.error('Erro ao criar profissional:', error);
@@ -519,7 +558,7 @@ app.post('/api/dentistas', authMiddleware, async (req, res) => {
 app.put('/api/dentistas/:id', authMiddleware, async (req, res) => {
     try {
         const { id } = req.params;
-        const { nome, cro, especialidade, icone, foto } = req.body;
+        const { nome, cro, especialidade, icone, foto, intervalo_minutos, hora_entrada, hora_saida, almoco_inicio, almoco_fim } = req.body;
         
         const result = await pool.query(
             `UPDATE profissionais 
@@ -528,10 +567,15 @@ app.put('/api/dentistas/:id', authMiddleware, async (req, res) => {
                  especialidade = COALESCE($3, especialidade), 
                  icone = COALESCE($4, icone),
                  foto = COALESCE($5, foto),
+                 intervalo_minutos = COALESCE($6, intervalo_minutos),
+                 hora_entrada = COALESCE($7, hora_entrada),
+                 hora_saida = COALESCE($8, hora_saida),
+                 almoco_inicio = COALESCE($9, almoco_inicio),
+                 almoco_fim = COALESCE($10, almoco_fim),
                  atualizado_em = NOW()
-             WHERE id = $6 AND dentista_id = $7 AND ativo = true
+             WHERE id = $11 AND dentista_id = $12 AND ativo = true
              RETURNING *`,
-            [nome, cro, especialidade, icone, foto, parseInt(id), parseInt(req.user.id)]
+            [nome, cro, especialidade, icone, foto, intervalo_minutos, hora_entrada, hora_saida, almoco_inicio, almoco_fim, parseInt(id), parseInt(req.user.id)]
         );
         
         if (result.rows.length === 0) {
@@ -545,11 +589,57 @@ app.put('/api/dentistas/:id', authMiddleware, async (req, res) => {
             cro: p.cro,
             especialidade: p.especialidade,
             icone: p.icone,
-            foto: p.foto
+            foto: p.foto,
+            intervalo_minutos: p.intervalo_minutos || 30,
+            hora_entrada: p.hora_entrada ? p.hora_entrada.substring(0, 5) : '08:00',
+            hora_saida: p.hora_saida ? p.hora_saida.substring(0, 5) : '18:00',
+            almoco_inicio: p.almoco_inicio ? p.almoco_inicio.substring(0, 5) : '12:00',
+            almoco_fim: p.almoco_fim ? p.almoco_fim.substring(0, 5) : '13:00'
         });
     } catch (error) {
         console.error('Erro ao atualizar profissional:', error);
         res.status(500).json({ erro: 'Erro ao atualizar profissional' });
+    }
+});
+
+// Atualizar só as configurações de horário do profissional
+app.patch('/api/dentistas/:id/config', authMiddleware, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { intervalo_minutos, hora_entrada, hora_saida, almoco_inicio, almoco_fim } = req.body;
+        
+        const result = await pool.query(
+            `UPDATE profissionais 
+             SET intervalo_minutos = COALESCE($1, intervalo_minutos),
+                 hora_entrada = COALESCE($2, hora_entrada),
+                 hora_saida = COALESCE($3, hora_saida),
+                 almoco_inicio = COALESCE($4, almoco_inicio),
+                 almoco_fim = COALESCE($5, almoco_fim),
+                 atualizado_em = NOW()
+             WHERE id = $6 AND dentista_id = $7 AND ativo = true
+             RETURNING *`,
+            [intervalo_minutos, hora_entrada, hora_saida, almoco_inicio, almoco_fim, parseInt(id), parseInt(req.user.id)]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ erro: 'Profissional não encontrado' });
+        }
+        
+        const p = result.rows[0];
+        res.json({
+            success: true,
+            message: 'Configurações atualizadas!',
+            config: {
+                intervalo_minutos: p.intervalo_minutos || 30,
+                hora_entrada: p.hora_entrada ? p.hora_entrada.substring(0, 5) : '08:00',
+                hora_saida: p.hora_saida ? p.hora_saida.substring(0, 5) : '18:00',
+                almoco_inicio: p.almoco_inicio ? p.almoco_inicio.substring(0, 5) : '12:00',
+                almoco_fim: p.almoco_fim ? p.almoco_fim.substring(0, 5) : '13:00'
+            }
+        });
+    } catch (error) {
+        console.error('Erro ao atualizar configurações:', error);
+        res.status(500).json({ erro: 'Erro ao atualizar configurações' });
     }
 });
 

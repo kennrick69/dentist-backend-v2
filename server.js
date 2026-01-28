@@ -1205,16 +1205,26 @@ app.post('/api/agendamentos/confirmar', async (req, res) => {
 
 app.get('/api/agendamentos', authMiddleware, async (req, res) => {
     try {
-        const { data, inicio, fim } = req.query;
+        const { data, inicio, fim, profissional_id } = req.query;
         let query = 'SELECT * FROM agendamentos WHERE dentista_id = $1';
         const params = [parseInt(req.user.id)];
+        let paramIndex = 2;
+
+        // Filtrar por profissional específico (coluna da agenda)
+        if (profissional_id) {
+            query += ` AND profissional_id = $${paramIndex}`;
+            params.push(parseInt(profissional_id));
+            paramIndex++;
+        }
 
         if (data) {
-            query += ' AND data = $2';
+            query += ` AND data = $${paramIndex}`;
             params.push(data);
+            paramIndex++;
         } else if (inicio && fim) {
-            query += ' AND data >= $2 AND data <= $3';
+            query += ` AND data >= $${paramIndex} AND data <= $${paramIndex + 1}`;
             params.push(inicio, fim);
+            paramIndex += 2;
         }
 
         query += ' ORDER BY data ASC, horario ASC';
@@ -1223,9 +1233,9 @@ app.get('/api/agendamentos', authMiddleware, async (req, res) => {
         const agendamentos = result.rows.map(a => ({
             id: a.id.toString(),
             pacienteId: a.paciente_id ? a.paciente_id.toString() : null,
-            pacienteNome: a.paciente_nome,
+            paciente_nome: a.paciente_nome,
             data: a.data,
-            horario: a.horario,
+            hora: a.horario,
             duracao: a.duracao,
             procedimento: a.procedimento,
             valor: a.valor,
@@ -1234,18 +1244,20 @@ app.get('/api/agendamentos', authMiddleware, async (req, res) => {
             observacoes: a.observacoes,
             codigoConfirmacao: a.codigo_confirmacao,
             rotulo: a.rotulo,
+            profissional_id: a.profissional_id,
             criadoEm: a.criado_em
         }));
 
         res.json({ success: true, agendamentos, total: agendamentos.length });
     } catch (error) {
+        console.error('Erro listar agendamentos:', error);
         res.status(500).json({ success: false, erro: 'Erro ao listar agendamentos' });
     }
 });
 
 app.post('/api/agendamentos', authMiddleware, async (req, res) => {
     try {
-        const { pacienteId, pacienteNome, data, horario, duracao, procedimento, valor, status, encaixe, observacoes, rotulo } = req.body;
+        const { pacienteId, pacienteNome, data, horario, duracao, procedimento, valor, status, encaixe, observacoes, rotulo, profissional_id, dentista_id } = req.body;
 
         if (!data || !horario) {
             return res.status(400).json({ success: false, erro: 'Data e horário obrigatórios' });
@@ -1260,10 +1272,14 @@ app.post('/api/agendamentos', authMiddleware, async (req, res) => {
         // Gerar código único de confirmação
         const codigoConfirmacao = await gerarCodigoUnico();
 
+        // profissional_id = ID do profissional na agenda (coluna)
+        // dentista_id do body = mesmo que profissional_id (compatibilidade)
+        const profId = profissional_id || dentista_id || null;
+
         const result = await pool.query(
-            `INSERT INTO agendamentos (dentista_id, paciente_id, paciente_nome, data, horario, duracao, procedimento, valor, status, encaixe, observacoes, codigo_confirmacao, rotulo)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
-            [parseInt(req.user.id), pacienteId ? parseInt(pacienteId) : null, nomePaciente, data, horario, duracao || 60, procedimento, valor, status || 'agendado', encaixe || false, observacoes, codigoConfirmacao, rotulo || null]
+            `INSERT INTO agendamentos (dentista_id, paciente_id, paciente_nome, data, horario, duracao, procedimento, valor, status, encaixe, observacoes, codigo_confirmacao, rotulo, profissional_id)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
+            [parseInt(req.user.id), pacienteId ? parseInt(pacienteId) : null, nomePaciente, data, horario, duracao || 60, procedimento, valor, status || 'agendado', encaixe || false, observacoes, codigoConfirmacao, rotulo || null, profId ? parseInt(profId) : null]
         );
 
         const a = result.rows[0];
@@ -1272,14 +1288,15 @@ app.post('/api/agendamentos', authMiddleware, async (req, res) => {
             message: 'Agendamento criado!',
             agendamento: { 
                 id: a.id.toString(), 
-                pacienteNome: a.paciente_nome, 
+                paciente_nome: a.paciente_nome, 
                 data: a.data, 
-                horario: a.horario, 
+                hora: a.horario, 
                 procedimento: a.procedimento, 
                 status: a.status, 
                 encaixe: a.encaixe,
                 codigoConfirmacao: a.codigo_confirmacao,
-                rotulo: a.rotulo
+                rotulo: a.rotulo,
+                profissional_id: a.profissional_id
             }
         });
     } catch (error) {

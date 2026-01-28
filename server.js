@@ -233,6 +233,18 @@ async function initDatabase() {
             'ALTER TABLE agendamentos ADD COLUMN IF NOT EXISTS hora TIME',
             'ALTER TABLE agendamentos ADD COLUMN IF NOT EXISTS duracao INTEGER DEFAULT 30',
             'ALTER TABLE pacientes ADD COLUMN IF NOT EXISTS ativo BOOLEAN DEFAULT true',
+            'ALTER TABLE pacientes ADD COLUMN IF NOT EXISTS rg VARCHAR(20)',
+            'ALTER TABLE pacientes ADD COLUMN IF NOT EXISTS data_nascimento DATE',
+            'ALTER TABLE pacientes ADD COLUMN IF NOT EXISTS sexo VARCHAR(20)',
+            'ALTER TABLE pacientes ADD COLUMN IF NOT EXISTS celular VARCHAR(20)',
+            'ALTER TABLE pacientes ADD COLUMN IF NOT EXISTS endereco VARCHAR(255)',
+            'ALTER TABLE pacientes ADD COLUMN IF NOT EXISTS numero VARCHAR(20)',
+            'ALTER TABLE pacientes ADD COLUMN IF NOT EXISTS complemento VARCHAR(100)',
+            'ALTER TABLE pacientes ADD COLUMN IF NOT EXISTS bairro VARCHAR(100)',
+            'ALTER TABLE pacientes ADD COLUMN IF NOT EXISTS cidade VARCHAR(100)',
+            'ALTER TABLE pacientes ADD COLUMN IF NOT EXISTS estado VARCHAR(2)',
+            'ALTER TABLE pacientes ADD COLUMN IF NOT EXISTS cep VARCHAR(10)',
+            'ALTER TABLE pacientes ADD COLUMN IF NOT EXISTS observacoes TEXT',
             'ALTER TABLE pacientes ADD COLUMN IF NOT EXISTS convenio VARCHAR(100)',
             'ALTER TABLE pacientes ADD COLUMN IF NOT EXISTS numero_convenio VARCHAR(50)',
             'ALTER TABLE pacientes ADD COLUMN IF NOT EXISTS menor_idade BOOLEAN DEFAULT false',
@@ -909,8 +921,52 @@ app.post('/api/pacientes', authMiddleware, async (req, res) => {
             estrangeiro, passaporte, pais, nacionalidade, tipo_documento
         } = req.body;
 
-        if (!nome) {
-            return res.status(400).json({ success: false, erro: 'Nome é obrigatório' });
+        // ========== VALIDAÇÕES OBRIGATÓRIAS PARA NFS-e ==========
+        
+        // Nome é sempre obrigatório
+        if (!nome || nome.trim().length < 3) {
+            return res.status(400).json({ success: false, erro: 'Nome completo é obrigatório (mínimo 3 caracteres)' });
+        }
+        
+        // CPF ou Passaporte obrigatório
+        if (!estrangeiro && !cpf) {
+            return res.status(400).json({ success: false, erro: 'CPF é obrigatório para emissão de NFS-e' });
+        }
+        if (estrangeiro && !passaporte) {
+            return res.status(400).json({ success: false, erro: 'Passaporte é obrigatório para pacientes estrangeiros' });
+        }
+        
+        // Endereço completo obrigatório para NFS-e
+        if (!cep) {
+            return res.status(400).json({ success: false, erro: 'CEP é obrigatório para emissão de NFS-e' });
+        }
+        if (!endereco) {
+            return res.status(400).json({ success: false, erro: 'Endereço é obrigatório para emissão de NFS-e' });
+        }
+        if (!numero) {
+            return res.status(400).json({ success: false, erro: 'Número é obrigatório para emissão de NFS-e' });
+        }
+        if (!bairro) {
+            return res.status(400).json({ success: false, erro: 'Bairro é obrigatório para emissão de NFS-e' });
+        }
+        if (!cidade) {
+            return res.status(400).json({ success: false, erro: 'Cidade é obrigatória para emissão de NFS-e' });
+        }
+        if (!estado) {
+            return res.status(400).json({ success: false, erro: 'Estado é obrigatório para emissão de NFS-e' });
+        }
+        
+        // Para menores de idade, responsável com CPF é obrigatório
+        if (menorIdade) {
+            if (!responsavelNome) {
+                return res.status(400).json({ success: false, erro: 'Nome do responsável é obrigatório para menores de idade' });
+            }
+            if (!responsavelCpf) {
+                return res.status(400).json({ success: false, erro: 'CPF do responsável é obrigatório para emissão de NFS-e de menores' });
+            }
+            if (!responsavelParentesco) {
+                return res.status(400).json({ success: false, erro: 'Parentesco do responsável é obrigatório' });
+            }
         }
 
         const result = await pool.query(

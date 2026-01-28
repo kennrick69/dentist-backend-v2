@@ -360,11 +360,6 @@ app.post('/api/auth/login', async (req, res) => {
 
         const dentista = result.rows[0];
         
-        // DEBUG - ver o que vem do banco
-        console.log('Login tentativa:', email);
-        console.log('Campos do dentista:', Object.keys(dentista));
-        console.log('active:', dentista.active, 'ativo:', dentista.ativo);
-        
         if (!dentista.password) {
             return res.status(401).json({ success: false, erro: 'Email ou senha incorretos' });
         }
@@ -374,7 +369,7 @@ app.post('/api/auth/login', async (req, res) => {
         }
 
         // Verificar se conta está desativada
-        if (dentista.active === false || dentista.ativo === false) {
+        if (dentista.subscription_active === false) {
             return res.status(403).json({ success: false, erro: 'Conta desativada' });
         }
 
@@ -395,7 +390,7 @@ app.post('/api/auth/login', async (req, res) => {
                 email: dentista.email,
                 clinica: dentista.clinic,
                 especialidade: dentista.specialty,
-                plano: dentista.plano
+                plano: dentista.subscription_plan || 'premium'
             }
         });
     } catch (error) {
@@ -406,19 +401,25 @@ app.post('/api/auth/login', async (req, res) => {
 
 app.get('/api/auth/verify', authMiddleware, async (req, res) => {
     try {
-        console.log('Verify - user id:', req.user.id);
         const result = await pool.query(
-            'SELECT id, name, cro, email, clinic, specialty, plano FROM dentistas WHERE id = $1',
+            'SELECT id, name, cro, email, clinic, specialty, subscription_plan, subscription_active FROM dentistas WHERE id = $1',
             [parseInt(req.user.id)]
         );
-        console.log('Verify - encontrou:', result.rows.length, 'registros');
         if (result.rows.length === 0) {
             return res.status(404).json({ success: false, erro: 'Usuário não encontrado' });
         }
         const d = result.rows[0];
         res.json({
             success: true,
-            dentista: { id: d.id.toString(), nome: d.name, cro: d.cro, email: d.email, clinica: d.clinic, especialidade: d.specialty, plano: d.plano || 'premium' }
+            dentista: { 
+                id: d.id.toString(), 
+                nome: d.name, 
+                cro: d.cro, 
+                email: d.email, 
+                clinica: d.clinic, 
+                especialidade: d.specialty, 
+                plano: d.subscription_plan || 'premium' 
+            }
         });
     } catch (error) {
         console.error('Erro verify:', error);

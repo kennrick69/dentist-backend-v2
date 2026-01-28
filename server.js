@@ -374,6 +374,9 @@ app.post('/api/auth/login', async (req, res) => {
         }
 
         const dentista = result.rows[0];
+        if (!dentista.senha) {
+            return res.status(401).json({ success: false, erro: 'Email ou senha incorretos' });
+        }
         const senhaValida = await bcrypt.compare(password, dentista.senha);
         if (!senhaValida) {
             return res.status(401).json({ success: false, erro: 'Email ou senha incorretos' });

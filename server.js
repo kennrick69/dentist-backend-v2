@@ -987,13 +987,30 @@ app.get('/api/pacientes', authMiddleware, async (req, res) => {
         query += ` ORDER BY nome ASC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
         params.push(limit, offset);
         
-        // Executar queries
-        const [result, countResult] = await Promise.all([
+        // Queries de estatísticas (sempre retorna totais reais)
+        const statsQueries = {
+            total: `SELECT COUNT(*) FROM pacientes WHERE dentista_id = $1 AND (ativo = true OR ativo IS NULL)`,
+            completos: `SELECT COUNT(*) FROM pacientes WHERE dentista_id = $1 AND (ativo = true OR ativo IS NULL) AND cadastro_completo = true`,
+            incompletos: `SELECT COUNT(*) FROM pacientes WHERE dentista_id = $1 AND (ativo = true OR ativo IS NULL) AND (cadastro_completo = false OR cadastro_completo IS NULL)`,
+            menores: `SELECT COUNT(*) FROM pacientes WHERE dentista_id = $1 AND (ativo = true OR ativo IS NULL) AND menor_idade = true`
+        };
+        
+        // Executar todas as queries em paralelo
+        const [result, countResult, completosResult, incompletosResult, menoresResult] = await Promise.all([
             pool.query(query, params),
-            pool.query(countQuery, countParams)
+            pool.query(countQuery, countParams),
+            pool.query(statsQueries.completos, [parseInt(req.user.id)]),
+            pool.query(statsQueries.incompletos, [parseInt(req.user.id)]),
+            pool.query(statsQueries.menores, [parseInt(req.user.id)])
         ]);
         
         const total = parseInt(countResult.rows[0].count);
+        const stats = {
+            total: parseInt(countResult.rows[0].count),
+            completos: parseInt(completosResult.rows[0].count),
+            incompletos: parseInt(incompletosResult.rows[0].count),
+            menores: parseInt(menoresResult.rows[0].count)
+        };
 
         const pacientes = result.rows.map(p => ({
             id: p.id.toString(),
@@ -1037,6 +1054,7 @@ app.get('/api/pacientes', authMiddleware, async (req, res) => {
             success: true, 
             pacientes, 
             total,
+            stats,
             limit,
             offset,
             hasMore: offset + pacientes.length < total

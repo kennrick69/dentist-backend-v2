@@ -232,6 +232,7 @@ async function initDatabase() {
             'ALTER TABLE agendamentos ADD COLUMN IF NOT EXISTS paciente_telefone VARCHAR(30)',
             'ALTER TABLE agendamentos ADD COLUMN IF NOT EXISTS hora TIME',
             'ALTER TABLE agendamentos ADD COLUMN IF NOT EXISTS duracao INTEGER DEFAULT 30',
+            'ALTER TABLE agendamentos ADD COLUMN IF NOT EXISTS atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP',
             'ALTER TABLE pacientes ADD COLUMN IF NOT EXISTS ativo BOOLEAN DEFAULT true',
             'ALTER TABLE pacientes ADD COLUMN IF NOT EXISTS rg VARCHAR(20)',
             'ALTER TABLE pacientes ADD COLUMN IF NOT EXISTS data_nascimento DATE',
@@ -276,10 +277,41 @@ async function initDatabase() {
             try { await pool.query(query); } catch (e) {}
         }
 
+        // Tabela de configurações da clínica
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS config_clinica (
+                id SERIAL PRIMARY KEY,
+                dentista_id INTEGER REFERENCES dentistas(id) ON DELETE CASCADE UNIQUE,
+                nome_clinica VARCHAR(255),
+                nome_dentista VARCHAR(255),
+                telefone VARCHAR(20),
+                whatsapp VARCHAR(20),
+                endereco TEXT,
+                assinatura TEXT,
+                hora_abre TIME DEFAULT '08:00',
+                hora_fecha TIME DEFAULT '18:00',
+                intervalo_padrao INTEGER DEFAULT 30,
+                dias_atendimento VARCHAR(100) DEFAULT 'Segunda a Sexta',
+                periodo_confirmacao INTEGER DEFAULT 48,
+                msg_aniversario TEXT,
+                criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
         console.log('Banco de dados inicializado!');
     } catch (error) {
         console.error('Erro ao inicializar banco:', error.message);
     }
+}
+
+// ==============================================================================
+// FUNÇÃO PARA VALIDAR ID NUMÉRICO
+// ==============================================================================
+
+function validarId(valor) {
+    const id = parseInt(valor);
+    return !isNaN(id) && id > 0 ? id : null;
 }
 
 // ==============================================================================
@@ -321,11 +353,16 @@ function authMiddleware(req, res, next) {
     const token = authHeader && authHeader.split(' ')[1];
 
     if (!token) {
+        console.log('Auth: Token não fornecido');
         return res.status(401).json({ success: false, erro: 'Token não fornecido' });
     }
 
     jwt.verify(token, JWT_SECRET, (err, decoded) => {
         if (err) {
+            console.log('Auth: Token inválido -', err.message);
+            if (err.name === 'TokenExpiredError') {
+                return res.status(403).json({ success: false, erro: 'Sessão expirada. Faça login novamente.' });
+            }
             return res.status(403).json({ success: false, erro: 'Token inválido' });
         }
         req.user = decoded;
@@ -402,7 +439,7 @@ app.post('/api/auth/login', async (req, res) => {
         const token = jwt.sign(
             { id: dentista.id.toString(), email: dentista.email, nome: dentista.name },
             JWT_SECRET,
-            { expiresIn: '7d' }
+            { expiresIn: '30d' }
         );
 
         res.json({
@@ -805,6 +842,119 @@ app.delete('/api/fila-encaixe/:id', authMiddleware, async (req, res) => {
 });
 
 // ==============================================================================
+// ROTAS DE CONFIGURAÇÕES DA CLÍNICA
+// ==============================================================================
+
+// Buscar configurações da clínica
+app.get('/api/config-clinica', authMiddleware, async (req, res) => {
+    try {
+        const result = await pool.query(
+            'SELECT * FROM config_clinica WHERE dentista_id = $1',
+            [parseInt(req.user.id)]
+        );
+        
+        if (result.rows.length === 0) {
+            // Retorna config vazia se não existir
+            return res.json({ 
+                success: true, 
+                config: {
+                    nome_clinica: '',
+                    nome_dentista: '',
+                    telefone: '',
+                    whatsapp: '',
+                    endereco: '',
+                    assinatura: '',
+                    hora_abre: '08:00',
+                    hora_fecha: '18:00',
+                    intervalo_padrao: 30,
+                    dias_atendimento: 'Segunda a Sexta',
+                    periodo_confirmacao: 48,
+                    msg_aniversario: ''
+                }
+            });
+        }
+        
+        const c = result.rows[0];
+        res.json({
+            success: true,
+            config: {
+                nome_clinica: c.nome_clinica || '',
+                nome_dentista: c.nome_dentista || '',
+                telefone: c.telefone || '',
+                whatsapp: c.whatsapp || '',
+                endereco: c.endereco || '',
+                assinatura: c.assinatura || '',
+                hora_abre: c.hora_abre || '08:00',
+                hora_fecha: c.hora_fecha || '18:00',
+                intervalo_padrao: c.intervalo_padrao || 30,
+                dias_atendimento: c.dias_atendimento || 'Segunda a Sexta',
+                periodo_confirmacao: c.periodo_confirmacao || 48,
+                msg_aniversario: c.msg_aniversario || ''
+            }
+        });
+    } catch (error) {
+        console.error('Erro buscar config:', error);
+        res.status(500).json({ success: false, erro: 'Erro ao buscar configurações' });
+    }
+});
+
+// Salvar configurações da clínica
+app.put('/api/config-clinica', authMiddleware, async (req, res) => {
+    try {
+        const {
+            nome_clinica, nome_dentista, telefone, whatsapp, endereco, assinatura,
+            hora_abre, hora_fecha, intervalo_padrao, dias_atendimento,
+            periodo_confirmacao, msg_aniversario
+        } = req.body;
+        
+        // Usar UPSERT (INSERT ... ON CONFLICT UPDATE)
+        const result = await pool.query(
+            `INSERT INTO config_clinica (
+                dentista_id, nome_clinica, nome_dentista, telefone, whatsapp, endereco, assinatura,
+                hora_abre, hora_fecha, intervalo_padrao, dias_atendimento, periodo_confirmacao, msg_aniversario,
+                atualizado_em
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW())
+            ON CONFLICT (dentista_id) DO UPDATE SET
+                nome_clinica = EXCLUDED.nome_clinica,
+                nome_dentista = EXCLUDED.nome_dentista,
+                telefone = EXCLUDED.telefone,
+                whatsapp = EXCLUDED.whatsapp,
+                endereco = EXCLUDED.endereco,
+                assinatura = EXCLUDED.assinatura,
+                hora_abre = EXCLUDED.hora_abre,
+                hora_fecha = EXCLUDED.hora_fecha,
+                intervalo_padrao = EXCLUDED.intervalo_padrao,
+                dias_atendimento = EXCLUDED.dias_atendimento,
+                periodo_confirmacao = EXCLUDED.periodo_confirmacao,
+                msg_aniversario = EXCLUDED.msg_aniversario,
+                atualizado_em = NOW()
+            RETURNING *`,
+            [
+                parseInt(req.user.id),
+                nome_clinica || null,
+                nome_dentista || null,
+                telefone || null,
+                whatsapp || null,
+                endereco || null,
+                assinatura || null,
+                hora_abre || '08:00',
+                hora_fecha || '18:00',
+                intervalo_padrao || 30,
+                dias_atendimento || 'Segunda a Sexta',
+                periodo_confirmacao || 48,
+                msg_aniversario || null
+            ]
+        );
+        
+        console.log(`Config clínica salva para dentista ${req.user.id}`);
+        res.json({ success: true, message: 'Configurações salvas!', config: result.rows[0] });
+    } catch (error) {
+        console.error('Erro salvar config:', error);
+        res.status(500).json({ success: false, erro: 'Erro ao salvar configurações' });
+    }
+});
+
+// ==============================================================================
 // ROTAS DE PACIENTES
 // ==============================================================================
 
@@ -860,12 +1010,44 @@ app.get('/api/pacientes', authMiddleware, async (req, res) => {
     }
 });
 
+// Buscar aniversariantes de hoje (DEVE FICAR ANTES DA ROTA :id)
+app.get('/api/pacientes/aniversariantes', authMiddleware, async (req, res) => {
+    try {
+        const hoje = new Date();
+        const dia = hoje.getDate();
+        const mes = hoje.getMonth() + 1;
+        
+        const result = await pool.query(
+            `SELECT id, nome, data_nascimento, celular
+             FROM pacientes 
+             WHERE dentista_id = $1 
+               AND EXTRACT(DAY FROM data_nascimento) = $2
+               AND EXTRACT(MONTH FROM data_nascimento) = $3
+               AND ativo = true
+             ORDER BY nome`,
+            [parseInt(req.user.id), dia, mes]
+        );
+        
+        res.json({ success: true, pacientes: result.rows });
+    } catch (error) {
+        console.error('Erro buscar aniversariantes:', error);
+        res.status(500).json({ success: false, erro: 'Erro ao buscar aniversariantes' });
+    }
+});
+
 // Buscar paciente por ID
 app.get('/api/pacientes/:id', authMiddleware, async (req, res) => {
     try {
+        const id = validarId(req.params.id);
+        
+        // Validar se ID é um número válido
+        if (!id) {
+            return res.status(400).json({ success: false, erro: 'ID de paciente inválido' });
+        }
+        
         const result = await pool.query(
             'SELECT * FROM pacientes WHERE id = $1 AND dentista_id = $2',
-            [parseInt(req.params.id), parseInt(req.user.id)]
+            [id, parseInt(req.user.id)]
         );
 
         if (result.rows.length === 0) {
@@ -1071,9 +1253,14 @@ app.put('/api/pacientes/:id', authMiddleware, async (req, res) => {
 // Deletar paciente (soft delete)
 app.delete('/api/pacientes/:id', authMiddleware, async (req, res) => {
     try {
+        const id = validarId(req.params.id);
+        if (!id) {
+            return res.status(400).json({ success: false, erro: 'ID inválido' });
+        }
+        
         const result = await pool.query(
             'UPDATE pacientes SET ativo = false WHERE id = $1 AND dentista_id = $2 RETURNING id',
-            [parseInt(req.params.id), parseInt(req.user.id)]
+            [id, parseInt(req.user.id)]
         );
 
         if (result.rows.length === 0) {
@@ -1099,8 +1286,9 @@ app.get('/api/agendamentos/buscar-codigo/:codigo', async (req, res) => {
             return res.status(400).json({ success: false, erro: 'Codigo invalido' });
         }
         
+        // Query usando colunas do banco de produção (name, clinic)
         const result = await pool.query(
-            `SELECT a.*, d.name as dentista_nome, d.clinic as clinica_nome, d.telefone as clinica_telefone
+            `SELECT a.*, d.name as dentista_nome, d.clinic as clinica_nome
              FROM agendamentos a 
              JOIN dentistas d ON a.dentista_id = d.id
              WHERE a.codigo_confirmacao = $1`,
@@ -1122,7 +1310,7 @@ app.get('/api/agendamentos/buscar-codigo/:codigo', async (req, res) => {
                 status: a.status,
                 dentistaNome: a.dentista_nome,
                 clinicaNome: a.clinica_nome,
-                clinicaTelefone: a.clinica_telefone
+                clinicaTelefone: null // Telefone será pego das configurações locais
             }
         });
     } catch (error) {
@@ -1144,9 +1332,9 @@ app.post('/api/agendamentos/confirmar', async (req, res) => {
             return res.status(400).json({ success: false, erro: 'Acao invalida' });
         }
         
-        // Buscar agendamento
+        // Buscar agendamento - usando colunas do banco de produção
         const busca = await pool.query(
-            `SELECT a.*, d.name as dentista_nome, d.clinic as clinica_nome, d.telefone as clinica_telefone
+            `SELECT a.*, d.name as dentista_nome, d.clinic as clinica_nome
              FROM agendamentos a 
              JOIN dentistas d ON a.dentista_id = d.id
              WHERE a.codigo_confirmacao = $1`,
@@ -1172,7 +1360,7 @@ app.post('/api/agendamentos/confirmar', async (req, res) => {
                     status: 'confirmado',
                     dentistaNome: agendamento.dentista_nome,
                     clinicaNome: agendamento.clinica_nome,
-                    clinicaTelefone: agendamento.clinica_telefone
+                    clinicaTelefone: null
                 }
             });
         }
@@ -1180,7 +1368,7 @@ app.post('/api/agendamentos/confirmar', async (req, res) => {
         // Atualizar status
         const novoStatus = acao === 'confirmar' ? 'confirmado' : 'cancelado';
         await pool.query(
-            'UPDATE agendamentos SET status = $1, atualizado_em = NOW() WHERE id = $2',
+            'UPDATE agendamentos SET status = $1 WHERE id = $2',
             [novoStatus, agendamento.id]
         );
         
@@ -1197,7 +1385,7 @@ app.post('/api/agendamentos/confirmar', async (req, res) => {
                 status: novoStatus,
                 dentistaNome: agendamento.dentista_nome,
                 clinicaNome: agendamento.clinica_nome,
-                clinicaTelefone: agendamento.clinica_telefone
+                clinicaTelefone: null
             }
         });
     } catch (error) {
@@ -1309,31 +1497,6 @@ app.get('/api/agendamentos/pendentes', authMiddleware, async (req, res) => {
     }
 });
 
-// Buscar aniversariantes de hoje
-app.get('/api/pacientes/aniversariantes', authMiddleware, async (req, res) => {
-    try {
-        const hoje = new Date();
-        const dia = hoje.getDate();
-        const mes = hoje.getMonth() + 1;
-        
-        const result = await pool.query(
-            `SELECT id, nome, data_nascimento, celular
-             FROM pacientes 
-             WHERE dentista_id = $1 
-               AND EXTRACT(DAY FROM data_nascimento) = $2
-               AND EXTRACT(MONTH FROM data_nascimento) = $3
-               AND ativo = true
-             ORDER BY nome`,
-            [parseInt(req.user.id), dia, mes]
-        );
-        
-        res.json({ success: true, pacientes: result.rows });
-    } catch (error) {
-        console.error('Erro buscar aniversariantes:', error);
-        res.status(500).json({ success: false, erro: 'Erro ao buscar aniversariantes' });
-    }
-});
-
 // Buscar agendamentos com tel. de recados (pacientes que têm tel_recados preenchido)
 app.get('/api/agendamentos/recados', authMiddleware, async (req, res) => {
     try {
@@ -1431,12 +1594,17 @@ app.post('/api/agendamentos', authMiddleware, async (req, res) => {
 // Buscar agendamento por ID
 app.get('/api/agendamentos/:id', authMiddleware, async (req, res) => {
     try {
+        const id = validarId(req.params.id);
+        if (!id) {
+            return res.status(400).json({ success: false, erro: 'ID inválido' });
+        }
+        
         const result = await pool.query(
             `SELECT a.*, p.celular as paciente_telefone_db
              FROM agendamentos a
              LEFT JOIN pacientes p ON a.paciente_id = p.id
              WHERE a.id = $1 AND a.dentista_id = $2`,
-            [parseInt(req.params.id), parseInt(req.user.id)]
+            [id, parseInt(req.user.id)]
         );
 
         if (result.rows.length === 0) {
@@ -1470,11 +1638,17 @@ app.get('/api/agendamentos/:id', authMiddleware, async (req, res) => {
 
 app.put('/api/agendamentos/:id', authMiddleware, async (req, res) => {
     try {
+        const id = validarId(req.params.id);
+        if (!id) {
+            return res.status(400).json({ success: false, erro: 'ID inválido' });
+        }
+        
         const { pacienteId, pacienteNome, data, horario, duracao, procedimento, valor, status, encaixe, observacoes } = req.body;
 
         let nomePaciente = pacienteNome;
-        if (pacienteId && !nomePaciente) {
-            const pacResult = await pool.query('SELECT nome FROM pacientes WHERE id = $1', [parseInt(pacienteId)]);
+        const pacId = validarId(pacienteId);
+        if (pacId && !nomePaciente) {
+            const pacResult = await pool.query('SELECT nome FROM pacientes WHERE id = $1', [pacId]);
             if (pacResult.rows.length > 0) nomePaciente = pacResult.rows[0].nome;
         }
 
@@ -1482,7 +1656,7 @@ app.put('/api/agendamentos/:id', authMiddleware, async (req, res) => {
             `UPDATE agendamentos SET paciente_id = $1, paciente_nome = $2, data = COALESCE($3, data), horario = COALESCE($4, horario),
              duracao = COALESCE($5, duracao), procedimento = $6, valor = $7, status = COALESCE($8, status), encaixe = COALESCE($9, encaixe),
              observacoes = $10, atualizado_em = CURRENT_TIMESTAMP WHERE id = $11 AND dentista_id = $12 RETURNING *`,
-            [pacienteId ? parseInt(pacienteId) : null, nomePaciente, data, horario, duracao, procedimento, valor, status, encaixe, observacoes, parseInt(req.params.id), parseInt(req.user.id)]
+            [pacId, nomePaciente, data, horario, duracao, procedimento, valor, status, encaixe, observacoes, id, parseInt(req.user.id)]
         );
 
         if (result.rows.length === 0) {
@@ -1497,9 +1671,14 @@ app.put('/api/agendamentos/:id', authMiddleware, async (req, res) => {
 
 app.delete('/api/agendamentos/:id', authMiddleware, async (req, res) => {
     try {
+        const id = validarId(req.params.id);
+        if (!id) {
+            return res.status(400).json({ success: false, erro: 'ID inválido' });
+        }
+        
         const result = await pool.query(
             'DELETE FROM agendamentos WHERE id = $1 AND dentista_id = $2 RETURNING id',
-            [parseInt(req.params.id), parseInt(req.user.id)]
+            [id, parseInt(req.user.id)]
         );
 
         if (result.rows.length === 0) {
@@ -1518,9 +1697,14 @@ app.delete('/api/agendamentos/:id', authMiddleware, async (req, res) => {
 
 app.get('/api/prontuarios/:pacienteId', authMiddleware, async (req, res) => {
     try {
+        const pacienteId = validarId(req.params.pacienteId);
+        if (!pacienteId) {
+            return res.status(400).json({ success: false, erro: 'ID de paciente inválido' });
+        }
+        
         const result = await pool.query(
             `SELECT * FROM prontuarios WHERE paciente_id = $1 AND dentista_id = $2 ORDER BY data DESC`,
-            [parseInt(req.params.pacienteId), parseInt(req.user.id)]
+            [pacienteId, parseInt(req.user.id)]
         );
 
         const prontuarios = result.rows.map(p => ({
@@ -1620,10 +1804,15 @@ app.post('/api/financeiro', authMiddleware, async (req, res) => {
 
 app.put('/api/financeiro/:id', authMiddleware, async (req, res) => {
     try {
+        const id = validarId(req.params.id);
+        if (!id) {
+            return res.status(400).json({ success: false, erro: 'ID inválido' });
+        }
+        
         const { status } = req.body;
         const result = await pool.query(
             'UPDATE financeiro SET status = $1 WHERE id = $2 AND dentista_id = $3 RETURNING *',
-            [status, parseInt(req.params.id), parseInt(req.user.id)]
+            [status, id, parseInt(req.user.id)]
         );
 
         if (result.rows.length === 0) {
@@ -1638,9 +1827,14 @@ app.put('/api/financeiro/:id', authMiddleware, async (req, res) => {
 
 app.delete('/api/financeiro/:id', authMiddleware, async (req, res) => {
     try {
+        const id = validarId(req.params.id);
+        if (!id) {
+            return res.status(400).json({ success: false, erro: 'ID inválido' });
+        }
+        
         const result = await pool.query(
             'DELETE FROM financeiro WHERE id = $1 AND dentista_id = $2 RETURNING id',
-            [parseInt(req.params.id), parseInt(req.user.id)]
+            [id, parseInt(req.user.id)]
         );
 
         if (result.rows.length === 0) {

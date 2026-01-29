@@ -276,6 +276,28 @@ async function initDatabase() {
             try { await pool.query(query); } catch (e) {}
         }
 
+        // Tabela de configurações da clínica
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS config_clinica (
+                id SERIAL PRIMARY KEY,
+                dentista_id INTEGER REFERENCES dentistas(id) ON DELETE CASCADE UNIQUE,
+                nome_clinica VARCHAR(255),
+                nome_dentista VARCHAR(255),
+                telefone VARCHAR(20),
+                whatsapp VARCHAR(20),
+                endereco TEXT,
+                assinatura TEXT,
+                hora_abre TIME DEFAULT '08:00',
+                hora_fecha TIME DEFAULT '18:00',
+                intervalo_padrao INTEGER DEFAULT 30,
+                dias_atendimento VARCHAR(100) DEFAULT 'Segunda a Sexta',
+                periodo_confirmacao INTEGER DEFAULT 48,
+                msg_aniversario TEXT,
+                criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
         console.log('Banco de dados inicializado!');
     } catch (error) {
         console.error('Erro ao inicializar banco:', error.message);
@@ -801,6 +823,119 @@ app.delete('/api/fila-encaixe/:id', authMiddleware, async (req, res) => {
     } catch (error) {
         console.error('Erro ao remover da fila:', error);
         res.status(500).json({ erro: 'Erro ao remover da fila' });
+    }
+});
+
+// ==============================================================================
+// ROTAS DE CONFIGURAÇÕES DA CLÍNICA
+// ==============================================================================
+
+// Buscar configurações da clínica
+app.get('/api/config-clinica', authMiddleware, async (req, res) => {
+    try {
+        const result = await pool.query(
+            'SELECT * FROM config_clinica WHERE dentista_id = $1',
+            [parseInt(req.user.id)]
+        );
+        
+        if (result.rows.length === 0) {
+            // Retorna config vazia se não existir
+            return res.json({ 
+                success: true, 
+                config: {
+                    nome_clinica: '',
+                    nome_dentista: '',
+                    telefone: '',
+                    whatsapp: '',
+                    endereco: '',
+                    assinatura: '',
+                    hora_abre: '08:00',
+                    hora_fecha: '18:00',
+                    intervalo_padrao: 30,
+                    dias_atendimento: 'Segunda a Sexta',
+                    periodo_confirmacao: 48,
+                    msg_aniversario: ''
+                }
+            });
+        }
+        
+        const c = result.rows[0];
+        res.json({
+            success: true,
+            config: {
+                nome_clinica: c.nome_clinica || '',
+                nome_dentista: c.nome_dentista || '',
+                telefone: c.telefone || '',
+                whatsapp: c.whatsapp || '',
+                endereco: c.endereco || '',
+                assinatura: c.assinatura || '',
+                hora_abre: c.hora_abre || '08:00',
+                hora_fecha: c.hora_fecha || '18:00',
+                intervalo_padrao: c.intervalo_padrao || 30,
+                dias_atendimento: c.dias_atendimento || 'Segunda a Sexta',
+                periodo_confirmacao: c.periodo_confirmacao || 48,
+                msg_aniversario: c.msg_aniversario || ''
+            }
+        });
+    } catch (error) {
+        console.error('Erro buscar config:', error);
+        res.status(500).json({ success: false, erro: 'Erro ao buscar configurações' });
+    }
+});
+
+// Salvar configurações da clínica
+app.put('/api/config-clinica', authMiddleware, async (req, res) => {
+    try {
+        const {
+            nome_clinica, nome_dentista, telefone, whatsapp, endereco, assinatura,
+            hora_abre, hora_fecha, intervalo_padrao, dias_atendimento,
+            periodo_confirmacao, msg_aniversario
+        } = req.body;
+        
+        // Usar UPSERT (INSERT ... ON CONFLICT UPDATE)
+        const result = await pool.query(
+            `INSERT INTO config_clinica (
+                dentista_id, nome_clinica, nome_dentista, telefone, whatsapp, endereco, assinatura,
+                hora_abre, hora_fecha, intervalo_padrao, dias_atendimento, periodo_confirmacao, msg_aniversario,
+                atualizado_em
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW())
+            ON CONFLICT (dentista_id) DO UPDATE SET
+                nome_clinica = EXCLUDED.nome_clinica,
+                nome_dentista = EXCLUDED.nome_dentista,
+                telefone = EXCLUDED.telefone,
+                whatsapp = EXCLUDED.whatsapp,
+                endereco = EXCLUDED.endereco,
+                assinatura = EXCLUDED.assinatura,
+                hora_abre = EXCLUDED.hora_abre,
+                hora_fecha = EXCLUDED.hora_fecha,
+                intervalo_padrao = EXCLUDED.intervalo_padrao,
+                dias_atendimento = EXCLUDED.dias_atendimento,
+                periodo_confirmacao = EXCLUDED.periodo_confirmacao,
+                msg_aniversario = EXCLUDED.msg_aniversario,
+                atualizado_em = NOW()
+            RETURNING *`,
+            [
+                parseInt(req.user.id),
+                nome_clinica || null,
+                nome_dentista || null,
+                telefone || null,
+                whatsapp || null,
+                endereco || null,
+                assinatura || null,
+                hora_abre || '08:00',
+                hora_fecha || '18:00',
+                intervalo_padrao || 30,
+                dias_atendimento || 'Segunda a Sexta',
+                periodo_confirmacao || 48,
+                msg_aniversario || null
+            ]
+        );
+        
+        console.log(`Config clínica salva para dentista ${req.user.id}`);
+        res.json({ success: true, message: 'Configurações salvas!', config: result.rows[0] });
+    } catch (error) {
+        console.error('Erro salvar config:', error);
+        res.status(500).json({ success: false, erro: 'Erro ao salvar configurações' });
     }
 });
 

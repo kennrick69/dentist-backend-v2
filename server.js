@@ -353,11 +353,16 @@ function authMiddleware(req, res, next) {
     const token = authHeader && authHeader.split(' ')[1];
 
     if (!token) {
+        console.log('Auth: Token não fornecido');
         return res.status(401).json({ success: false, erro: 'Token não fornecido' });
     }
 
     jwt.verify(token, JWT_SECRET, (err, decoded) => {
         if (err) {
+            console.log('Auth: Token inválido -', err.message);
+            if (err.name === 'TokenExpiredError') {
+                return res.status(403).json({ success: false, erro: 'Sessão expirada. Faça login novamente.' });
+            }
             return res.status(403).json({ success: false, erro: 'Token inválido' });
         }
         req.user = decoded;
@@ -434,7 +439,7 @@ app.post('/api/auth/login', async (req, res) => {
         const token = jwt.sign(
             { id: dentista.id.toString(), email: dentista.email, nome: dentista.name },
             JWT_SECRET,
-            { expiresIn: '7d' }
+            { expiresIn: '30d' }
         );
 
         res.json({
@@ -1005,6 +1010,31 @@ app.get('/api/pacientes', authMiddleware, async (req, res) => {
     }
 });
 
+// Buscar aniversariantes de hoje (DEVE FICAR ANTES DA ROTA :id)
+app.get('/api/pacientes/aniversariantes', authMiddleware, async (req, res) => {
+    try {
+        const hoje = new Date();
+        const dia = hoje.getDate();
+        const mes = hoje.getMonth() + 1;
+        
+        const result = await pool.query(
+            `SELECT id, nome, data_nascimento, celular
+             FROM pacientes 
+             WHERE dentista_id = $1 
+               AND EXTRACT(DAY FROM data_nascimento) = $2
+               AND EXTRACT(MONTH FROM data_nascimento) = $3
+               AND ativo = true
+             ORDER BY nome`,
+            [parseInt(req.user.id), dia, mes]
+        );
+        
+        res.json({ success: true, pacientes: result.rows });
+    } catch (error) {
+        console.error('Erro buscar aniversariantes:', error);
+        res.status(500).json({ success: false, erro: 'Erro ao buscar aniversariantes' });
+    }
+});
+
 // Buscar paciente por ID
 app.get('/api/pacientes/:id', authMiddleware, async (req, res) => {
     try {
@@ -1464,31 +1494,6 @@ app.get('/api/agendamentos/pendentes', authMiddleware, async (req, res) => {
     } catch (error) {
         console.error('Erro buscar pendentes:', error);
         res.status(500).json({ success: false, erro: 'Erro ao buscar agendamentos pendentes' });
-    }
-});
-
-// Buscar aniversariantes de hoje
-app.get('/api/pacientes/aniversariantes', authMiddleware, async (req, res) => {
-    try {
-        const hoje = new Date();
-        const dia = hoje.getDate();
-        const mes = hoje.getMonth() + 1;
-        
-        const result = await pool.query(
-            `SELECT id, nome, data_nascimento, celular
-             FROM pacientes 
-             WHERE dentista_id = $1 
-               AND EXTRACT(DAY FROM data_nascimento) = $2
-               AND EXTRACT(MONTH FROM data_nascimento) = $3
-               AND ativo = true
-             ORDER BY nome`,
-            [parseInt(req.user.id), dia, mes]
-        );
-        
-        res.json({ success: true, pacientes: result.rows });
-    } catch (error) {
-        console.error('Erro buscar aniversariantes:', error);
-        res.status(500).json({ success: false, erro: 'Erro ao buscar aniversariantes' });
     }
 });
 

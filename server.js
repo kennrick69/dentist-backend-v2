@@ -305,6 +305,15 @@ async function initDatabase() {
 }
 
 // ==============================================================================
+// FUNÇÃO PARA VALIDAR ID NUMÉRICO
+// ==============================================================================
+
+function validarId(valor) {
+    const id = parseInt(valor);
+    return !isNaN(id) && id > 0 ? id : null;
+}
+
+// ==============================================================================
 // FUNÇÃO PARA GERAR CÓDIGO ÚNICO DE CONFIRMAÇÃO
 // ==============================================================================
 
@@ -998,9 +1007,16 @@ app.get('/api/pacientes', authMiddleware, async (req, res) => {
 // Buscar paciente por ID
 app.get('/api/pacientes/:id', authMiddleware, async (req, res) => {
     try {
+        const id = validarId(req.params.id);
+        
+        // Validar se ID é um número válido
+        if (!id) {
+            return res.status(400).json({ success: false, erro: 'ID de paciente inválido' });
+        }
+        
         const result = await pool.query(
             'SELECT * FROM pacientes WHERE id = $1 AND dentista_id = $2',
-            [parseInt(req.params.id), parseInt(req.user.id)]
+            [id, parseInt(req.user.id)]
         );
 
         if (result.rows.length === 0) {
@@ -1206,9 +1222,14 @@ app.put('/api/pacientes/:id', authMiddleware, async (req, res) => {
 // Deletar paciente (soft delete)
 app.delete('/api/pacientes/:id', authMiddleware, async (req, res) => {
     try {
+        const id = validarId(req.params.id);
+        if (!id) {
+            return res.status(400).json({ success: false, erro: 'ID inválido' });
+        }
+        
         const result = await pool.query(
             'UPDATE pacientes SET ativo = false WHERE id = $1 AND dentista_id = $2 RETURNING id',
-            [parseInt(req.params.id), parseInt(req.user.id)]
+            [id, parseInt(req.user.id)]
         );
 
         if (result.rows.length === 0) {
@@ -1567,12 +1588,17 @@ app.post('/api/agendamentos', authMiddleware, async (req, res) => {
 // Buscar agendamento por ID
 app.get('/api/agendamentos/:id', authMiddleware, async (req, res) => {
     try {
+        const id = validarId(req.params.id);
+        if (!id) {
+            return res.status(400).json({ success: false, erro: 'ID inválido' });
+        }
+        
         const result = await pool.query(
             `SELECT a.*, p.celular as paciente_telefone_db
              FROM agendamentos a
              LEFT JOIN pacientes p ON a.paciente_id = p.id
              WHERE a.id = $1 AND a.dentista_id = $2`,
-            [parseInt(req.params.id), parseInt(req.user.id)]
+            [id, parseInt(req.user.id)]
         );
 
         if (result.rows.length === 0) {
@@ -1606,11 +1632,17 @@ app.get('/api/agendamentos/:id', authMiddleware, async (req, res) => {
 
 app.put('/api/agendamentos/:id', authMiddleware, async (req, res) => {
     try {
+        const id = validarId(req.params.id);
+        if (!id) {
+            return res.status(400).json({ success: false, erro: 'ID inválido' });
+        }
+        
         const { pacienteId, pacienteNome, data, horario, duracao, procedimento, valor, status, encaixe, observacoes } = req.body;
 
         let nomePaciente = pacienteNome;
-        if (pacienteId && !nomePaciente) {
-            const pacResult = await pool.query('SELECT nome FROM pacientes WHERE id = $1', [parseInt(pacienteId)]);
+        const pacId = validarId(pacienteId);
+        if (pacId && !nomePaciente) {
+            const pacResult = await pool.query('SELECT nome FROM pacientes WHERE id = $1', [pacId]);
             if (pacResult.rows.length > 0) nomePaciente = pacResult.rows[0].nome;
         }
 
@@ -1618,7 +1650,7 @@ app.put('/api/agendamentos/:id', authMiddleware, async (req, res) => {
             `UPDATE agendamentos SET paciente_id = $1, paciente_nome = $2, data = COALESCE($3, data), horario = COALESCE($4, horario),
              duracao = COALESCE($5, duracao), procedimento = $6, valor = $7, status = COALESCE($8, status), encaixe = COALESCE($9, encaixe),
              observacoes = $10, atualizado_em = CURRENT_TIMESTAMP WHERE id = $11 AND dentista_id = $12 RETURNING *`,
-            [pacienteId ? parseInt(pacienteId) : null, nomePaciente, data, horario, duracao, procedimento, valor, status, encaixe, observacoes, parseInt(req.params.id), parseInt(req.user.id)]
+            [pacId, nomePaciente, data, horario, duracao, procedimento, valor, status, encaixe, observacoes, id, parseInt(req.user.id)]
         );
 
         if (result.rows.length === 0) {
@@ -1633,9 +1665,14 @@ app.put('/api/agendamentos/:id', authMiddleware, async (req, res) => {
 
 app.delete('/api/agendamentos/:id', authMiddleware, async (req, res) => {
     try {
+        const id = validarId(req.params.id);
+        if (!id) {
+            return res.status(400).json({ success: false, erro: 'ID inválido' });
+        }
+        
         const result = await pool.query(
             'DELETE FROM agendamentos WHERE id = $1 AND dentista_id = $2 RETURNING id',
-            [parseInt(req.params.id), parseInt(req.user.id)]
+            [id, parseInt(req.user.id)]
         );
 
         if (result.rows.length === 0) {
@@ -1654,9 +1691,14 @@ app.delete('/api/agendamentos/:id', authMiddleware, async (req, res) => {
 
 app.get('/api/prontuarios/:pacienteId', authMiddleware, async (req, res) => {
     try {
+        const pacienteId = validarId(req.params.pacienteId);
+        if (!pacienteId) {
+            return res.status(400).json({ success: false, erro: 'ID de paciente inválido' });
+        }
+        
         const result = await pool.query(
             `SELECT * FROM prontuarios WHERE paciente_id = $1 AND dentista_id = $2 ORDER BY data DESC`,
-            [parseInt(req.params.pacienteId), parseInt(req.user.id)]
+            [pacienteId, parseInt(req.user.id)]
         );
 
         const prontuarios = result.rows.map(p => ({
@@ -1756,10 +1798,15 @@ app.post('/api/financeiro', authMiddleware, async (req, res) => {
 
 app.put('/api/financeiro/:id', authMiddleware, async (req, res) => {
     try {
+        const id = validarId(req.params.id);
+        if (!id) {
+            return res.status(400).json({ success: false, erro: 'ID inválido' });
+        }
+        
         const { status } = req.body;
         const result = await pool.query(
             'UPDATE financeiro SET status = $1 WHERE id = $2 AND dentista_id = $3 RETURNING *',
-            [status, parseInt(req.params.id), parseInt(req.user.id)]
+            [status, id, parseInt(req.user.id)]
         );
 
         if (result.rows.length === 0) {
@@ -1774,9 +1821,14 @@ app.put('/api/financeiro/:id', authMiddleware, async (req, res) => {
 
 app.delete('/api/financeiro/:id', authMiddleware, async (req, res) => {
     try {
+        const id = validarId(req.params.id);
+        if (!id) {
+            return res.status(400).json({ success: false, erro: 'ID inválido' });
+        }
+        
         const result = await pool.query(
             'DELETE FROM financeiro WHERE id = $1 AND dentista_id = $2 RETURNING id',
-            [parseInt(req.params.id), parseInt(req.user.id)]
+            [id, parseInt(req.user.id)]
         );
 
         if (result.rows.length === 0) {

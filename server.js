@@ -1099,11 +1099,9 @@ app.get('/api/agendamentos/buscar-codigo/:codigo', async (req, res) => {
             return res.status(400).json({ success: false, erro: 'Codigo invalido' });
         }
         
-        // Query compatível - usando apenas colunas que certamente existem
+        // Query usando colunas do banco de produção (name, clinic)
         const result = await pool.query(
-            `SELECT a.*, 
-                    COALESCE(d.nome, d.name, 'Dentista') as dentista_nome, 
-                    COALESCE(d.clinica, d.clinic, 'Clínica') as clinica_nome
+            `SELECT a.*, d.name as dentista_nome, d.clinic as clinica_nome
              FROM agendamentos a 
              JOIN dentistas d ON a.dentista_id = d.id
              WHERE a.codigo_confirmacao = $1`,
@@ -1147,11 +1145,9 @@ app.post('/api/agendamentos/confirmar', async (req, res) => {
             return res.status(400).json({ success: false, erro: 'Acao invalida' });
         }
         
-        // Buscar agendamento - Query compatível com banco em produção
+        // Buscar agendamento - usando colunas do banco de produção
         const busca = await pool.query(
-            `SELECT a.*, 
-                    COALESCE(d.nome, d.name, 'Dentista') as dentista_nome, 
-                    COALESCE(d.clinica, d.clinic, 'Clínica') as clinica_nome
+            `SELECT a.*, d.name as dentista_nome, d.clinic as clinica_nome
              FROM agendamentos a 
              JOIN dentistas d ON a.dentista_id = d.id
              WHERE a.codigo_confirmacao = $1`,

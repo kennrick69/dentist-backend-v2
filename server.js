@@ -232,6 +232,7 @@ async function initDatabase() {
             'ALTER TABLE agendamentos ADD COLUMN IF NOT EXISTS paciente_telefone VARCHAR(30)',
             'ALTER TABLE agendamentos ADD COLUMN IF NOT EXISTS hora TIME',
             'ALTER TABLE agendamentos ADD COLUMN IF NOT EXISTS duracao INTEGER DEFAULT 30',
+            'ALTER TABLE agendamentos ADD COLUMN IF NOT EXISTS atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP',
             'ALTER TABLE pacientes ADD COLUMN IF NOT EXISTS ativo BOOLEAN DEFAULT true',
             'ALTER TABLE pacientes ADD COLUMN IF NOT EXISTS rg VARCHAR(20)',
             'ALTER TABLE pacientes ADD COLUMN IF NOT EXISTS data_nascimento DATE',
@@ -1337,7 +1338,7 @@ app.post('/api/agendamentos/confirmar', async (req, res) => {
         // Atualizar status
         const novoStatus = acao === 'confirmar' ? 'confirmado' : 'cancelado';
         await pool.query(
-            'UPDATE agendamentos SET status = $1, atualizado_em = NOW() WHERE id = $2',
+            'UPDATE agendamentos SET status = $1 WHERE id = $2',
             [novoStatus, agendamento.id]
         );
         

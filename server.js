@@ -261,6 +261,9 @@ async function initDatabase() {
             'ALTER TABLE pacientes ADD COLUMN IF NOT EXISTS pais VARCHAR(100)',
             'ALTER TABLE pacientes ADD COLUMN IF NOT EXISTS nacionalidade VARCHAR(100)',
             'ALTER TABLE pacientes ADD COLUMN IF NOT EXISTS tipo_documento VARCHAR(20) DEFAULT \'cpf\'',
+            // Campos para Tel. de Recados
+            'ALTER TABLE pacientes ADD COLUMN IF NOT EXISTS tel_recados VARCHAR(20)',
+            'ALTER TABLE pacientes ADD COLUMN IF NOT EXISTS nome_recado VARCHAR(100)',
             // Campos de configuração do profissional
             'ALTER TABLE profissionais ADD COLUMN IF NOT EXISTS intervalo_minutos INTEGER DEFAULT 30',
             'ALTER TABLE profissionais ADD COLUMN IF NOT EXISTS hora_entrada TIME DEFAULT \'08:00\'',
@@ -918,7 +921,9 @@ app.post('/api/pacientes', authMiddleware, async (req, res) => {
             menorIdade, responsavelNome, responsavelCpf, responsavelRg,
             responsavelTelefone, responsavelEmail, responsavelParentesco, responsavelEndereco,
             // Campos de estrangeiro
-            estrangeiro, passaporte, pais, nacionalidade, tipo_documento
+            estrangeiro, passaporte, pais, nacionalidade, tipo_documento,
+            // Campos de Tel. Recados
+            tel_recados, nome_recado
         } = req.body;
 
         // ========== VALIDAÇÕES OBRIGATÓRIAS PARA NFS-e ==========
@@ -976,8 +981,9 @@ app.post('/api/pacientes', authMiddleware, async (req, res) => {
                 convenio, numero_convenio, observacoes,
                 menor_idade, responsavel_nome, responsavel_cpf, responsavel_rg,
                 responsavel_telefone, responsavel_email, responsavel_parentesco, responsavel_endereco,
-                estrangeiro, passaporte, pais, nacionalidade, tipo_documento
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32)
+                estrangeiro, passaporte, pais, nacionalidade, tipo_documento,
+                tel_recados, nome_recado
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34)
             RETURNING *`,
             [
                 parseInt(req.user.id), nome, cpf || null, rg || null,
@@ -987,7 +993,8 @@ app.post('/api/pacientes', authMiddleware, async (req, res) => {
                 convenio || null, numeroConvenio || null, observacoes || null,
                 menorIdade || false, responsavelNome || null, responsavelCpf || null, responsavelRg || null,
                 responsavelTelefone || null, responsavelEmail || null, responsavelParentesco || null, responsavelEndereco || null,
-                estrangeiro || false, passaporte || null, pais || null, nacionalidade || null, tipo_documento || 'cpf'
+                estrangeiro || false, passaporte || null, pais || null, nacionalidade || null, tipo_documento || 'cpf',
+                tel_recados || null, nome_recado || null
             ]
         );
 
@@ -1255,6 +1262,122 @@ app.get('/api/agendamentos', authMiddleware, async (req, res) => {
     }
 });
 
+// Buscar agendamentos pendentes de confirmação (para envio em lote)
+app.get('/api/agendamentos/pendentes', authMiddleware, async (req, res) => {
+    try {
+        const { inicio, fim } = req.query;
+        
+        if (!inicio || !fim) {
+            return res.status(400).json({ success: false, erro: 'Período obrigatório (inicio e fim)' });
+        }
+        
+        // Buscar agendamentos pendentes (status = 'agendado') com dados do paciente e profissional
+        const result = await pool.query(
+            `SELECT a.*, 
+                    p.celular as paciente_telefone,
+                    prof.nome as profissional_nome
+             FROM agendamentos a
+             LEFT JOIN pacientes p ON a.paciente_id = p.id
+             LEFT JOIN profissionais prof ON a.profissional_id = prof.id
+             WHERE a.dentista_id = $1 
+               AND a.data >= $2 
+               AND a.data <= $3
+               AND (a.status = 'agendado' OR a.status IS NULL)
+             ORDER BY a.data ASC, a.horario ASC`,
+            [parseInt(req.user.id), inicio, fim]
+        );
+        
+        const agendamentos = result.rows.map(a => ({
+            id: a.id.toString(),
+            paciente_id: a.paciente_id ? a.paciente_id.toString() : null,
+            paciente_nome: a.paciente_nome,
+            paciente_telefone: a.paciente_telefone || null,
+            data: a.data,
+            hora: a.horario,
+            duracao: a.duracao,
+            procedimento: a.procedimento,
+            status: a.status,
+            codigo_confirmacao: a.codigo_confirmacao,
+            profissional_id: a.profissional_id,
+            profissional_nome: a.profissional_nome || 'Profissional'
+        }));
+        
+        res.json({ success: true, agendamentos, total: agendamentos.length });
+    } catch (error) {
+        console.error('Erro buscar pendentes:', error);
+        res.status(500).json({ success: false, erro: 'Erro ao buscar agendamentos pendentes' });
+    }
+});
+
+// Buscar aniversariantes de hoje
+app.get('/api/pacientes/aniversariantes', authMiddleware, async (req, res) => {
+    try {
+        const hoje = new Date();
+        const dia = hoje.getDate();
+        const mes = hoje.getMonth() + 1;
+        
+        const result = await pool.query(
+            `SELECT id, nome, data_nascimento, celular
+             FROM pacientes 
+             WHERE dentista_id = $1 
+               AND EXTRACT(DAY FROM data_nascimento) = $2
+               AND EXTRACT(MONTH FROM data_nascimento) = $3
+               AND ativo = true
+             ORDER BY nome`,
+            [parseInt(req.user.id), dia, mes]
+        );
+        
+        res.json({ success: true, pacientes: result.rows });
+    } catch (error) {
+        console.error('Erro buscar aniversariantes:', error);
+        res.status(500).json({ success: false, erro: 'Erro ao buscar aniversariantes' });
+    }
+});
+
+// Buscar agendamentos com tel. de recados (pacientes que têm tel_recados preenchido)
+app.get('/api/agendamentos/recados', authMiddleware, async (req, res) => {
+    try {
+        const { inicio, fim } = req.query;
+        
+        if (!inicio || !fim) {
+            return res.status(400).json({ success: false, erro: 'Período obrigatório' });
+        }
+        
+        const result = await pool.query(
+            `SELECT a.*, 
+                    p.tel_recados,
+                    p.nome_recado,
+                    prof.nome as profissional_nome
+             FROM agendamentos a
+             JOIN pacientes p ON a.paciente_id = p.id
+             LEFT JOIN profissionais prof ON a.profissional_id = prof.id
+             WHERE a.dentista_id = $1 
+               AND a.data >= $2 
+               AND a.data <= $3
+               AND p.tel_recados IS NOT NULL 
+               AND p.tel_recados != ''
+             ORDER BY a.data ASC, a.horario ASC`,
+            [parseInt(req.user.id), inicio, fim]
+        );
+        
+        const agendamentos = result.rows.map(a => ({
+            id: a.id.toString(),
+            paciente_nome: a.paciente_nome,
+            tel_recados: a.tel_recados,
+            nome_recado: a.nome_recado,
+            data: a.data,
+            hora: a.horario,
+            procedimento: a.procedimento,
+            profissional_nome: a.profissional_nome || 'Profissional'
+        }));
+        
+        res.json({ success: true, agendamentos });
+    } catch (error) {
+        console.error('Erro buscar recados:', error);
+        res.status(500).json({ success: false, erro: 'Erro ao buscar recados' });
+    }
+});
+
 app.post('/api/agendamentos', authMiddleware, async (req, res) => {
     try {
         const { pacienteId, pacienteNome, data, horario, duracao, procedimento, valor, status, encaixe, observacoes, rotulo, profissional_id, dentista_id } = req.body;
@@ -1302,6 +1425,46 @@ app.post('/api/agendamentos', authMiddleware, async (req, res) => {
     } catch (error) {
         console.error('Erro criar agendamento:', error);
         res.status(500).json({ success: false, erro: 'Erro ao criar agendamento' });
+    }
+});
+
+// Buscar agendamento por ID
+app.get('/api/agendamentos/:id', authMiddleware, async (req, res) => {
+    try {
+        const result = await pool.query(
+            `SELECT a.*, p.celular as paciente_telefone_db
+             FROM agendamentos a
+             LEFT JOIN pacientes p ON a.paciente_id = p.id
+             WHERE a.id = $1 AND a.dentista_id = $2`,
+            [parseInt(req.params.id), parseInt(req.user.id)]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ success: false, erro: 'Agendamento não encontrado' });
+        }
+
+        const a = result.rows[0];
+        res.json({
+            id: a.id.toString(),
+            paciente_id: a.paciente_id ? a.paciente_id.toString() : null,
+            paciente_nome: a.paciente_nome,
+            paciente_telefone: a.paciente_telefone_db || null,
+            data: a.data,
+            hora: a.horario,
+            duracao: a.duracao,
+            procedimento: a.procedimento,
+            valor: a.valor,
+            status: a.status,
+            encaixe: a.encaixe || false,
+            observacoes: a.observacoes,
+            codigoConfirmacao: a.codigo_confirmacao,
+            rotulo: a.rotulo,
+            profissional_id: a.profissional_id,
+            criadoEm: a.criado_em
+        });
+    } catch (error) {
+        console.error('Erro buscar agendamento:', error);
+        res.status(500).json({ success: false, erro: 'Erro ao buscar agendamento' });
     }
 });
 

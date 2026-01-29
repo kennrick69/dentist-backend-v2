@@ -1099,8 +1099,11 @@ app.get('/api/agendamentos/buscar-codigo/:codigo', async (req, res) => {
             return res.status(400).json({ success: false, erro: 'Codigo invalido' });
         }
         
+        // Query compatível - usando apenas colunas que certamente existem
         const result = await pool.query(
-            `SELECT a.*, d.name as dentista_nome, d.clinic as clinica_nome, d.telefone as clinica_telefone
+            `SELECT a.*, 
+                    COALESCE(d.nome, d.name, 'Dentista') as dentista_nome, 
+                    COALESCE(d.clinica, d.clinic, 'Clínica') as clinica_nome
              FROM agendamentos a 
              JOIN dentistas d ON a.dentista_id = d.id
              WHERE a.codigo_confirmacao = $1`,
@@ -1122,7 +1125,7 @@ app.get('/api/agendamentos/buscar-codigo/:codigo', async (req, res) => {
                 status: a.status,
                 dentistaNome: a.dentista_nome,
                 clinicaNome: a.clinica_nome,
-                clinicaTelefone: a.clinica_telefone
+                clinicaTelefone: null // Telefone será pego das configurações locais
             }
         });
     } catch (error) {
@@ -1144,9 +1147,11 @@ app.post('/api/agendamentos/confirmar', async (req, res) => {
             return res.status(400).json({ success: false, erro: 'Acao invalida' });
         }
         
-        // Buscar agendamento
+        // Buscar agendamento - Query compatível com banco em produção
         const busca = await pool.query(
-            `SELECT a.*, d.name as dentista_nome, d.clinic as clinica_nome, d.telefone as clinica_telefone
+            `SELECT a.*, 
+                    COALESCE(d.nome, d.name, 'Dentista') as dentista_nome, 
+                    COALESCE(d.clinica, d.clinic, 'Clínica') as clinica_nome
              FROM agendamentos a 
              JOIN dentistas d ON a.dentista_id = d.id
              WHERE a.codigo_confirmacao = $1`,
@@ -1172,7 +1177,7 @@ app.post('/api/agendamentos/confirmar', async (req, res) => {
                     status: 'confirmado',
                     dentistaNome: agendamento.dentista_nome,
                     clinicaNome: agendamento.clinica_nome,
-                    clinicaTelefone: agendamento.clinica_telefone
+                    clinicaTelefone: null
                 }
             });
         }
@@ -1197,7 +1202,7 @@ app.post('/api/agendamentos/confirmar', async (req, res) => {
                 status: novoStatus,
                 dentistaNome: agendamento.dentista_nome,
                 clinicaNome: agendamento.clinica_nome,
-                clinicaTelefone: agendamento.clinica_telefone
+                clinicaTelefone: null
             }
         });
     } catch (error) {

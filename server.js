@@ -108,6 +108,7 @@ async function initDatabase() {
                 responsavel_parentesco VARCHAR(50),
                 responsavel_endereco TEXT,
                 ativo BOOLEAN DEFAULT true,
+                cadastro_completo BOOLEAN DEFAULT false,
                 criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -265,6 +266,8 @@ async function initDatabase() {
             // Campos para Tel. de Recados
             'ALTER TABLE pacientes ADD COLUMN IF NOT EXISTS tel_recados VARCHAR(20)',
             'ALTER TABLE pacientes ADD COLUMN IF NOT EXISTS nome_recado VARCHAR(100)',
+            // Campo para controle de cadastro completo (importação/cadastro parcial)
+            'ALTER TABLE pacientes ADD COLUMN IF NOT EXISTS cadastro_completo BOOLEAN DEFAULT false',
             // Campos de configuração do profissional
             'ALTER TABLE profissionais ADD COLUMN IF NOT EXISTS intervalo_minutos INTEGER DEFAULT 30',
             'ALTER TABLE profissionais ADD COLUMN IF NOT EXISTS hora_entrada TIME DEFAULT \'08:00\'',
@@ -1000,6 +1003,7 @@ app.get('/api/pacientes', authMiddleware, async (req, res) => {
             pais: p.pais,
             nacionalidade: p.nacionalidade,
             tipo_documento: p.tipo_documento || 'cpf',
+            cadastroCompleto: p.cadastro_completo || false,
             criadoEm: p.criado_em
         }));
 
@@ -1108,52 +1112,29 @@ app.post('/api/pacientes', authMiddleware, async (req, res) => {
             tel_recados, nome_recado
         } = req.body;
 
-        // ========== VALIDAÇÕES OBRIGATÓRIAS PARA NFS-e ==========
+        // ========== VALIDAÇÃO MÍNIMA ==========
         
         // Nome é sempre obrigatório
-        if (!nome || nome.trim().length < 3) {
-            return res.status(400).json({ success: false, erro: 'Nome completo é obrigatório (mínimo 3 caracteres)' });
+        if (!nome || nome.trim().length < 2) {
+            return res.status(400).json({ success: false, erro: 'Nome é obrigatório (mínimo 2 caracteres)' });
         }
         
-        // CPF ou Passaporte obrigatório
-        if (!estrangeiro && !cpf) {
-            return res.status(400).json({ success: false, erro: 'CPF é obrigatório para emissão de NFS-e' });
-        }
-        if (estrangeiro && !passaporte) {
-            return res.status(400).json({ success: false, erro: 'Passaporte é obrigatório para pacientes estrangeiros' });
+        // ========== CALCULAR SE CADASTRO ESTÁ COMPLETO ==========
+        // Cadastro completo = Nome + CPF (ou passaporte) + CEP
+        // Sem esses dados, não pode emitir NFS-e
+        
+        let cadastroCompleto = true;
+        
+        // Verificar documento (CPF ou passaporte)
+        if (estrangeiro) {
+            if (!passaporte) cadastroCompleto = false;
+        } else {
+            if (!cpf) cadastroCompleto = false;
         }
         
-        // Endereço completo obrigatório para NFS-e
+        // Verificar CEP
         if (!cep) {
-            return res.status(400).json({ success: false, erro: 'CEP é obrigatório para emissão de NFS-e' });
-        }
-        if (!endereco) {
-            return res.status(400).json({ success: false, erro: 'Endereço é obrigatório para emissão de NFS-e' });
-        }
-        if (!numero) {
-            return res.status(400).json({ success: false, erro: 'Número é obrigatório para emissão de NFS-e' });
-        }
-        if (!bairro) {
-            return res.status(400).json({ success: false, erro: 'Bairro é obrigatório para emissão de NFS-e' });
-        }
-        if (!cidade) {
-            return res.status(400).json({ success: false, erro: 'Cidade é obrigatória para emissão de NFS-e' });
-        }
-        if (!estado) {
-            return res.status(400).json({ success: false, erro: 'Estado é obrigatório para emissão de NFS-e' });
-        }
-        
-        // Para menores de idade, responsável com CPF é obrigatório
-        if (menorIdade) {
-            if (!responsavelNome) {
-                return res.status(400).json({ success: false, erro: 'Nome do responsável é obrigatório para menores de idade' });
-            }
-            if (!responsavelCpf) {
-                return res.status(400).json({ success: false, erro: 'CPF do responsável é obrigatório para emissão de NFS-e de menores' });
-            }
-            if (!responsavelParentesco) {
-                return res.status(400).json({ success: false, erro: 'Parentesco do responsável é obrigatório' });
-            }
+            cadastroCompleto = false;
         }
 
         const result = await pool.query(
@@ -1164,8 +1145,8 @@ app.post('/api/pacientes', authMiddleware, async (req, res) => {
                 menor_idade, responsavel_nome, responsavel_cpf, responsavel_rg,
                 responsavel_telefone, responsavel_email, responsavel_parentesco, responsavel_endereco,
                 estrangeiro, passaporte, pais, nacionalidade, tipo_documento,
-                tel_recados, nome_recado
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34)
+                tel_recados, nome_recado, cadastro_completo
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35)
             RETURNING *`,
             [
                 parseInt(req.user.id), nome, cpf || null, rg || null,
@@ -1176,14 +1157,14 @@ app.post('/api/pacientes', authMiddleware, async (req, res) => {
                 menorIdade || false, responsavelNome || null, responsavelCpf || null, responsavelRg || null,
                 responsavelTelefone || null, responsavelEmail || null, responsavelParentesco || null, responsavelEndereco || null,
                 estrangeiro || false, passaporte || null, pais || null, nacionalidade || null, tipo_documento || 'cpf',
-                tel_recados || null, nome_recado || null
+                tel_recados || null, nome_recado || null, cadastroCompleto
             ]
         );
 
         const p = result.rows[0];
         res.status(201).json({
             success: true,
-            message: 'Paciente cadastrado com sucesso!',
+            message: cadastroCompleto ? 'Paciente cadastrado com sucesso!' : 'Paciente cadastrado (cadastro incompleto - não pode emitir NFS-e)',
             paciente: {
                 id: p.id.toString(),
                 nome: p.nome,
@@ -1197,7 +1178,8 @@ app.post('/api/pacientes', authMiddleware, async (req, res) => {
                 passaporte: p.passaporte,
                 pais: p.pais,
                 nacionalidade: p.nacionalidade,
-                tipo_documento: p.tipo_documento
+                tipo_documento: p.tipo_documento,
+                cadastroCompleto: p.cadastro_completo || false
             }
         });
     } catch (error) {
@@ -1215,8 +1197,25 @@ app.put('/api/pacientes/:id', authMiddleware, async (req, res) => {
             endereco, numero, complemento, bairro, cidade, estado, cep,
             convenio, numeroConvenio, observacoes,
             menorIdade, responsavelNome, responsavelCpf, responsavelRg,
-            responsavelTelefone, responsavelEmail, responsavelParentesco, responsavelEndereco
+            responsavelTelefone, responsavelEmail, responsavelParentesco, responsavelEndereco,
+            estrangeiro, passaporte, pais, nacionalidade, tipo_documento
         } = req.body;
+
+        // ========== RECALCULAR SE CADASTRO ESTÁ COMPLETO ==========
+        // Cadastro completo = Nome + CPF (ou passaporte) + CEP
+        let cadastroCompleto = true;
+        
+        // Verificar documento (CPF ou passaporte)
+        if (estrangeiro) {
+            if (!passaporte) cadastroCompleto = false;
+        } else {
+            if (!cpf) cadastroCompleto = false;
+        }
+        
+        // Verificar CEP
+        if (!cep) {
+            cadastroCompleto = false;
+        }
 
         const result = await pool.query(
             `UPDATE pacientes SET
@@ -1226,8 +1225,10 @@ app.put('/api/pacientes/:id', authMiddleware, async (req, res) => {
                 convenio = $16, numero_convenio = $17, observacoes = $18,
                 menor_idade = $19, responsavel_nome = $20, responsavel_cpf = $21, responsavel_rg = $22,
                 responsavel_telefone = $23, responsavel_email = $24, responsavel_parentesco = $25, responsavel_endereco = $26,
+                estrangeiro = $27, passaporte = $28, pais = $29, nacionalidade = $30, tipo_documento = $31,
+                cadastro_completo = $32,
                 atualizado_em = CURRENT_TIMESTAMP
-            WHERE id = $27 AND dentista_id = $28 RETURNING *`,
+            WHERE id = $33 AND dentista_id = $34 RETURNING *`,
             [
                 nome, cpf || null, rg || null, dataNascimento || null, sexo || null,
                 telefone || null, celular || null, email || null, endereco || null, numero || null,
@@ -1235,6 +1236,8 @@ app.put('/api/pacientes/:id', authMiddleware, async (req, res) => {
                 convenio || null, numeroConvenio || null, observacoes || null,
                 menorIdade || false, responsavelNome || null, responsavelCpf || null, responsavelRg || null,
                 responsavelTelefone || null, responsavelEmail || null, responsavelParentesco || null, responsavelEndereco || null,
+                estrangeiro || false, passaporte || null, pais || null, nacionalidade || null, tipo_documento || 'cpf',
+                cadastroCompleto,
                 parseInt(id), parseInt(req.user.id)
             ]
         );
@@ -1243,7 +1246,16 @@ app.put('/api/pacientes/:id', authMiddleware, async (req, res) => {
             return res.status(404).json({ success: false, erro: 'Paciente não encontrado' });
         }
 
-        res.json({ success: true, message: 'Paciente atualizado!' });
+        const p = result.rows[0];
+        res.json({ 
+            success: true, 
+            message: cadastroCompleto ? 'Paciente atualizado!' : 'Paciente atualizado (cadastro incompleto)',
+            paciente: {
+                id: p.id.toString(),
+                nome: p.nome,
+                cadastroCompleto: p.cadastro_completo || false
+            }
+        });
     } catch (error) {
         console.error('Erro atualizar paciente:', error);
         res.status(500).json({ success: false, erro: 'Erro ao atualizar paciente' });
@@ -1879,6 +1891,28 @@ app.post('/api/notas', authMiddleware, async (req, res) => {
 
         if (!valor) {
             return res.status(400).json({ success: false, erro: 'Valor é obrigatório' });
+        }
+
+        // ========== VERIFICAR SE PACIENTE TEM CADASTRO COMPLETO ==========
+        if (pacienteId) {
+            const pacienteResult = await pool.query(
+                'SELECT nome, cadastro_completo FROM pacientes WHERE id = $1 AND dentista_id = $2',
+                [parseInt(pacienteId), parseInt(req.user.id)]
+            );
+            
+            if (pacienteResult.rows.length === 0) {
+                return res.status(404).json({ success: false, erro: 'Paciente não encontrado' });
+            }
+            
+            const paciente = pacienteResult.rows[0];
+            if (!paciente.cadastro_completo) {
+                return res.status(400).json({ 
+                    success: false, 
+                    erro: `Para emitir NFS-e para "${paciente.nome}", é necessário completar o cadastro (CPF e endereço)`,
+                    cadastroIncompleto: true,
+                    pacienteId: pacienteId
+                });
+            }
         }
 
         // Gerar número da nota (simplificado)

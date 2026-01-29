@@ -964,10 +964,36 @@ app.put('/api/config-clinica', authMiddleware, async (req, res) => {
 // Listar pacientes
 app.get('/api/pacientes', authMiddleware, async (req, res) => {
     try {
-        const result = await pool.query(
-            `SELECT * FROM pacientes WHERE dentista_id = $1 AND (ativo = true OR ativo IS NULL) ORDER BY nome ASC`,
-            [parseInt(req.user.id)]
-        );
+        // Paginação: limit e offset (padrão: 50 por página)
+        const limit = parseInt(req.query.limit) || 50;
+        const offset = parseInt(req.query.offset) || 0;
+        const busca = req.query.busca || '';
+        
+        // Query base
+        let query = `SELECT * FROM pacientes WHERE dentista_id = $1 AND (ativo = true OR ativo IS NULL)`;
+        let countQuery = `SELECT COUNT(*) FROM pacientes WHERE dentista_id = $1 AND (ativo = true OR ativo IS NULL)`;
+        let params = [parseInt(req.user.id)];
+        let countParams = [parseInt(req.user.id)];
+        
+        // Se tiver busca, filtrar
+        if (busca) {
+            query += ` AND (LOWER(nome) LIKE $2 OR cpf LIKE $2 OR telefone LIKE $2 OR celular LIKE $2)`;
+            countQuery += ` AND (LOWER(nome) LIKE $2 OR cpf LIKE $2 OR telefone LIKE $2 OR celular LIKE $2)`;
+            params.push('%' + busca.toLowerCase() + '%');
+            countParams.push('%' + busca.toLowerCase() + '%');
+        }
+        
+        // Ordenar e paginar
+        query += ` ORDER BY nome ASC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+        params.push(limit, offset);
+        
+        // Executar queries
+        const [result, countResult] = await Promise.all([
+            pool.query(query, params),
+            pool.query(countQuery, countParams)
+        ]);
+        
+        const total = parseInt(countResult.rows[0].count);
 
         const pacientes = result.rows.map(p => ({
             id: p.id.toString(),
@@ -1007,7 +1033,14 @@ app.get('/api/pacientes', authMiddleware, async (req, res) => {
             criadoEm: p.criado_em
         }));
 
-        res.json({ success: true, pacientes, total: pacientes.length });
+        res.json({ 
+            success: true, 
+            pacientes, 
+            total,
+            limit,
+            offset,
+            hasMore: offset + pacientes.length < total
+        });
     } catch (error) {
         console.error('Erro listar pacientes:', error);
         res.status(500).json({ success: false, erro: 'Erro ao listar pacientes' });

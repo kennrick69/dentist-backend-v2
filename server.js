@@ -273,7 +273,9 @@ async function initDatabase() {
             'ALTER TABLE profissionais ADD COLUMN IF NOT EXISTS hora_entrada TIME DEFAULT \'08:00\'',
             'ALTER TABLE profissionais ADD COLUMN IF NOT EXISTS hora_saida TIME DEFAULT \'18:00\'',
             'ALTER TABLE profissionais ADD COLUMN IF NOT EXISTS almoco_inicio TIME DEFAULT \'12:00\'',
-            'ALTER TABLE profissionais ADD COLUMN IF NOT EXISTS almoco_fim TIME DEFAULT \'13:00\''
+            'ALTER TABLE profissionais ADD COLUMN IF NOT EXISTS almoco_fim TIME DEFAULT \'13:00\'',
+            // Campo para vincular caso ao profissional que cadastrou
+            'ALTER TABLE casos_proteticos ADD COLUMN IF NOT EXISTS profissional_id INTEGER REFERENCES profissionais(id) ON DELETE SET NULL'
         ];
 
         for (const query of alterQueries) {
@@ -333,6 +335,7 @@ async function initDatabase() {
             CREATE TABLE IF NOT EXISTS casos_proteticos (
                 id SERIAL PRIMARY KEY,
                 dentista_id INTEGER NOT NULL REFERENCES dentistas(id) ON DELETE CASCADE,
+                profissional_id INTEGER REFERENCES profissionais(id) ON DELETE SET NULL,
                 paciente_id INTEGER NOT NULL REFERENCES pacientes(id) ON DELETE CASCADE,
                 laboratorio_id INTEGER REFERENCES laboratorios(id) ON DELETE SET NULL,
                 codigo VARCHAR(20) UNIQUE NOT NULL,
@@ -2284,15 +2287,17 @@ async function gerarCodigoCaso(dentistaId) {
 // Listar casos
 app.get('/api/casos-proteticos', authMiddleware, async (req, res) => {
     try {
-        const { status, laboratorio_id, paciente_id, urgencia, limit = 50, offset = 0 } = req.query;
+        const { status, laboratorio_id, paciente_id, profissional_id, urgencia, limit = 50, offset = 0 } = req.query;
 
         let query = `
             SELECT cp.*, p.nome as paciente_nome, l.nome as laboratorio_nome, l.whatsapp as laboratorio_whatsapp,
+                prof.nome as profissional_nome, prof.icone as profissional_icone,
                 (SELECT COUNT(*) FROM casos_arquivos WHERE caso_id = cp.id) as total_arquivos,
                 (SELECT COUNT(*) FROM casos_mensagens WHERE caso_id = cp.id AND lida = false AND remetente_tipo = 'laboratorio') as mensagens_nao_lidas
             FROM casos_proteticos cp
             LEFT JOIN pacientes p ON p.id = cp.paciente_id
             LEFT JOIN laboratorios l ON l.id = cp.laboratorio_id
+            LEFT JOIN profissionais prof ON prof.id = cp.profissional_id
             WHERE cp.dentista_id = $1
         `;
         let params = [parseInt(req.user.id)];
@@ -2301,6 +2306,7 @@ app.get('/api/casos-proteticos', authMiddleware, async (req, res) => {
         if (status) { query += ` AND cp.status = $${paramIndex}`; params.push(status); paramIndex++; }
         if (laboratorio_id) { query += ` AND cp.laboratorio_id = $${paramIndex}`; params.push(parseInt(laboratorio_id)); paramIndex++; }
         if (paciente_id) { query += ` AND cp.paciente_id = $${paramIndex}`; params.push(parseInt(paciente_id)); paramIndex++; }
+        if (profissional_id) { query += ` AND cp.profissional_id = $${paramIndex}`; params.push(parseInt(profissional_id)); paramIndex++; }
         if (urgencia) { query += ` AND cp.urgencia = $${paramIndex}`; params.push(urgencia); paramIndex++; }
 
         query += ` ORDER BY cp.criado_em DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
@@ -2326,6 +2332,9 @@ app.get('/api/casos-proteticos', authMiddleware, async (req, res) => {
             laboratorioId: c.laboratorio_id?.toString(),
             laboratorioNome: c.laboratorio_nome,
             laboratorioWhatsapp: c.laboratorio_whatsapp,
+            profissionalId: c.profissional_id?.toString(),
+            profissionalNome: c.profissional_nome,
+            profissionalIcone: c.profissional_icone,
             tipoTrabalho: c.tipo_trabalho,
             tipoTrabalhoDetalhe: c.tipo_trabalho_detalhe,
             dentes: c.dentes || [],
@@ -2442,7 +2451,7 @@ app.get('/api/casos-proteticos/:id', authMiddleware, async (req, res) => {
 // Criar caso
 app.post('/api/casos-proteticos', authMiddleware, async (req, res) => {
     try {
-        const { pacienteId, laboratorioId, tipoTrabalho, tipoTrabalhoDetalhe, dentes, material, materialDetalhe, tecnica, corShade, escalaCor, urgencia, dataEnvio, dataPrometida, observacoesClinics, observacoesTecnicas, valorCombinado } = req.body;
+        const { pacienteId, laboratorioId, profissionalId, tipoTrabalho, tipoTrabalhoDetalhe, dentes, material, materialDetalhe, tecnica, corShade, escalaCor, urgencia, dataEnvio, dataPrometida, observacoesClinics, observacoesTecnicas, valorCombinado } = req.body;
 
         if (!pacienteId || !tipoTrabalho) {
             return res.status(400).json({ success: false, erro: 'Paciente e tipo de trabalho são obrigatórios' });
@@ -2451,9 +2460,9 @@ app.post('/api/casos-proteticos', authMiddleware, async (req, res) => {
         const codigo = await gerarCodigoCaso(parseInt(req.user.id));
 
         const result = await pool.query(`
-            INSERT INTO casos_proteticos (dentista_id, paciente_id, laboratorio_id, codigo, tipo_trabalho, tipo_trabalho_detalhe, dentes, material, material_detalhe, tecnica, cor_shade, escala_cor, urgencia, data_envio, data_prometida, observacoes_clinicas, observacoes_tecnicas, valor_combinado, status)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, 'criado') RETURNING *
-        `, [parseInt(req.user.id), parseInt(pacienteId), laboratorioId ? parseInt(laboratorioId) : null, codigo, tipoTrabalho, tipoTrabalhoDetalhe || null, dentes || [], material || null, materialDetalhe || null, tecnica || 'convencional', corShade || null, escalaCor || null, urgencia || 'normal', dataEnvio || null, dataPrometida || null, observacoesClinics || null, observacoesTecnicas || null, valorCombinado || null]);
+            INSERT INTO casos_proteticos (dentista_id, profissional_id, paciente_id, laboratorio_id, codigo, tipo_trabalho, tipo_trabalho_detalhe, dentes, material, material_detalhe, tecnica, cor_shade, escala_cor, urgencia, data_envio, data_prometida, observacoes_clinicas, observacoes_tecnicas, valor_combinado, status)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, 'criado') RETURNING *
+        `, [parseInt(req.user.id), profissionalId ? parseInt(profissionalId) : null, parseInt(pacienteId), laboratorioId ? parseInt(laboratorioId) : null, codigo, tipoTrabalho, tipoTrabalhoDetalhe || null, dentes || [], material || null, materialDetalhe || null, tecnica || 'convencional', corShade || null, escalaCor || null, urgencia || 'normal', dataEnvio || null, dataPrometida || null, observacoesClinics || null, observacoesTecnicas || null, valorCombinado || null]);
 
         // Registrar no histórico
         await pool.query(`INSERT INTO casos_status_historico (caso_id, status_novo, alterado_por, tipo_usuario, observacao) VALUES ($1, 'criado', $2, 'dentista', 'Caso criado')`, [result.rows[0].id, req.user.nome || 'Dentista']);

@@ -2558,12 +2558,12 @@ app.get('/api/pacientes/:pacienteId/casos-proteticos', authMiddleware, async (re
 app.put('/api/casos-proteticos/:id', authMiddleware, async (req, res) => {
     try {
         const { id } = req.params;
-        const { laboratorioId, tipoTrabalho, tipoTrabalhoDetalhe, dentes, material, materialDetalhe, tecnica, corShade, escalaCor, urgencia, dataEnvio, dataPrometida, dataRetornoReal, observacoesClinics, observacoesTecnicas, valorCombinado, valorPago } = req.body;
+        const { laboratorioId, tipoTrabalho, tipoTrabalhoDetalhe, tipoPeca, dentes, material, materialDetalhe, tecnica, corShade, escalaCor, urgencia, dataEnvio, dataPrometida, dataRetornoReal, observacoesClinics, observacoesTecnicas, valorCombinado, valorPago } = req.body;
 
         const result = await pool.query(`
-            UPDATE casos_proteticos SET laboratorio_id = $1, tipo_trabalho = COALESCE($2, tipo_trabalho), tipo_trabalho_detalhe = $3, dentes = $4, material = $5, material_detalhe = $6, tecnica = $7, cor_shade = $8, escala_cor = $9, urgencia = $10, data_envio = $11, data_prometida = $12, data_retorno_real = $13, observacoes_clinicas = $14, observacoes_tecnicas = $15, valor_combinado = $16, valor_pago = $17, atualizado_em = CURRENT_TIMESTAMP
-            WHERE id = $18 AND dentista_id = $19 RETURNING *
-        `, [laboratorioId ? parseInt(laboratorioId) : null, tipoTrabalho, tipoTrabalhoDetalhe || null, dentes || [], material || null, materialDetalhe || null, tecnica || 'convencional', corShade || null, escalaCor || null, urgencia || 'normal', dataEnvio || null, dataPrometida || null, dataRetornoReal || null, observacoesClinics || null, observacoesTecnicas || null, valorCombinado || null, valorPago || null, parseInt(id), parseInt(req.user.id)]);
+            UPDATE casos_proteticos SET laboratorio_id = $1, tipo_trabalho = COALESCE($2, tipo_trabalho), tipo_trabalho_detalhe = $3, tipo_peca = COALESCE($4, tipo_peca), dentes = $5, material = $6, material_detalhe = $7, tecnica = $8, cor_shade = $9, escala_cor = $10, urgencia = $11, data_envio = $12, data_prometida = $13, data_retorno_real = $14, observacoes_clinicas = $15, observacoes_tecnicas = $16, valor_combinado = $17, valor_pago = $18, atualizado_em = CURRENT_TIMESTAMP
+            WHERE id = $19 AND dentista_id = $20 RETURNING *
+        `, [laboratorioId ? parseInt(laboratorioId) : null, tipoTrabalho, tipoTrabalhoDetalhe || null, tipoPeca || null, dentes || [], material || null, materialDetalhe || null, tecnica || 'convencional', corShade || null, escalaCor || null, urgencia || 'normal', dataEnvio || null, dataPrometida || null, dataRetornoReal || null, observacoesClinics || null, observacoesTecnicas || null, valorCombinado || null, valorPago || null, parseInt(id), parseInt(req.user.id)]);
 
         if (result.rows.length === 0) {
             return res.status(404).json({ success: false, erro: 'Caso não encontrado' });

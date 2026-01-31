@@ -2474,6 +2474,68 @@ app.post('/api/casos-proteticos', authMiddleware, async (req, res) => {
     }
 });
 
+// Buscar casos protéticos de um paciente específico (para Prontuário)
+app.get('/api/pacientes/:pacienteId/casos-proteticos', authMiddleware, async (req, res) => {
+    try {
+        const { pacienteId } = req.params;
+        const { status } = req.query; // opcional: filtrar por status
+        
+        let query = `
+            SELECT cp.*, 
+                l.nome as laboratorio_nome,
+                prof.nome as profissional_nome
+            FROM casos_proteticos cp
+            LEFT JOIN laboratorios l ON l.id = cp.laboratorio_id
+            LEFT JOIN profissionais prof ON prof.id = cp.profissional_id
+            WHERE cp.dentista_id = $1 AND cp.paciente_id = $2
+        `;
+        let params = [parseInt(req.user.id), parseInt(pacienteId)];
+        
+        if (status) {
+            query += ` AND cp.status = $3`;
+            params.push(status);
+        }
+        
+        query += ` ORDER BY cp.criado_em DESC`;
+        
+        const result = await pool.query(query, params);
+        
+        const casos = result.rows.map(c => ({
+            id: c.id.toString(),
+            codigo: c.codigo,
+            profissionalNome: c.profissional_nome,
+            laboratorioNome: c.laboratorio_nome,
+            tipoTrabalho: c.tipo_trabalho,
+            tipoTrabalhoDetalhe: c.tipo_trabalho_detalhe,
+            dentes: c.dentes || [],
+            material: c.material,
+            corShade: c.cor_shade,
+            urgencia: c.urgencia,
+            dataEnvio: c.data_envio,
+            dataPrometida: c.data_prometida,
+            dataRetornoReal: c.data_retorno_real,
+            status: c.status,
+            observacoesClinics: c.observacoes_clinicas,
+            valorCombinado: c.valor_combinado,
+            valorPago: c.valor_pago,
+            criadoEm: c.criado_em,
+            atualizadoEm: c.atualizado_em
+        }));
+        
+        // Estatísticas
+        const stats = {
+            total: casos.length,
+            finalizados: casos.filter(c => c.status === 'finalizado').length,
+            emAndamento: casos.filter(c => c.status !== 'finalizado' && c.status !== 'cancelado').length
+        };
+        
+        res.json({ success: true, casos, stats });
+    } catch (error) {
+        console.error('Erro ao buscar casos do paciente:', error);
+        res.status(500).json({ success: false, erro: 'Erro ao buscar casos' });
+    }
+});
+
 // Atualizar caso
 app.put('/api/casos-proteticos/:id', authMiddleware, async (req, res) => {
     try {

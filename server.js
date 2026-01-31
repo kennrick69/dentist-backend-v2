@@ -1092,12 +1092,25 @@ app.get('/api/pacientes', authMiddleware, async (req, res) => {
         let params = [parseInt(req.user.id)];
         let countParams = [parseInt(req.user.id)];
         
-        // Se tiver busca, filtrar
+        // Se tiver busca, filtrar (ignorando acentos)
         if (busca) {
-            query += ` AND (LOWER(nome) LIKE $2 OR cpf LIKE $2 OR telefone LIKE $2 OR celular LIKE $2)`;
-            countQuery += ` AND (LOWER(nome) LIKE $2 OR cpf LIKE $2 OR telefone LIKE $2 OR celular LIKE $2)`;
-            params.push('%' + busca.toLowerCase() + '%');
-            countParams.push('%' + busca.toLowerCase() + '%');
+            // Normaliza a busca removendo acentos
+            const buscaNorm = busca.toLowerCase()
+                .normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+            query += ` AND (
+                LOWER(TRANSLATE(nome, 'áàãâäéèêëíìîïóòõôöúùûüçñÁÀÃÂÄÉÈÊËÍÌÎÏÓÒÕÔÖÚÙÛÜÇÑ', 'aaaaaeeeeiiiiooooouuuucnAAAAAEEEEIIIIOOOOOUUUUCN')) LIKE $2 
+                OR cpf LIKE $2 
+                OR telefone LIKE $2 
+                OR celular LIKE $2
+            )`;
+            countQuery += ` AND (
+                LOWER(TRANSLATE(nome, 'áàãâäéèêëíìîïóòõôöúùûüçñÁÀÃÂÄÉÈÊËÍÌÎÏÓÒÕÔÖÚÙÛÜÇÑ', 'aaaaaeeeeiiiiooooouuuucnAAAAAEEEEIIIIOOOOOUUUUCN')) LIKE $2 
+                OR cpf LIKE $2 
+                OR telefone LIKE $2 
+                OR celular LIKE $2
+            )`;
+            params.push('%' + buscaNorm + '%');
+            countParams.push('%' + buscaNorm + '%');
         }
         
         // Ordenar e paginar

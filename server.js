@@ -275,7 +275,8 @@ async function initDatabase() {
             'ALTER TABLE profissionais ADD COLUMN IF NOT EXISTS almoco_inicio TIME DEFAULT \'12:00\'',
             'ALTER TABLE profissionais ADD COLUMN IF NOT EXISTS almoco_fim TIME DEFAULT \'13:00\'',
             // Campo para vincular caso ao profissional que cadastrou
-            'ALTER TABLE casos_proteticos ADD COLUMN IF NOT EXISTS profissional_id INTEGER REFERENCES profissionais(id) ON DELETE SET NULL'
+            'ALTER TABLE casos_proteticos ADD COLUMN IF NOT EXISTS profissional_id INTEGER REFERENCES profissionais(id) ON DELETE SET NULL',
+            'ALTER TABLE casos_proteticos ADD COLUMN IF NOT EXISTS tipo_peca VARCHAR(20) DEFAULT \'definitiva\''
         ];
 
         for (const query of alterQueries) {
@@ -341,6 +342,7 @@ async function initDatabase() {
                 codigo VARCHAR(20) UNIQUE NOT NULL,
                 tipo_trabalho VARCHAR(50) NOT NULL,
                 tipo_trabalho_detalhe TEXT,
+                tipo_peca VARCHAR(20) DEFAULT 'definitiva',
                 dentes TEXT[],
                 material VARCHAR(50),
                 material_detalhe TEXT,
@@ -2350,6 +2352,7 @@ app.get('/api/casos-proteticos', authMiddleware, async (req, res) => {
             profissionalIcone: c.profissional_icone,
             tipoTrabalho: c.tipo_trabalho,
             tipoTrabalhoDetalhe: c.tipo_trabalho_detalhe,
+            tipoPeca: c.tipo_peca,
             dentes: c.dentes || [],
             material: c.material,
             tecnica: c.tecnica,
@@ -2361,10 +2364,12 @@ app.get('/api/casos-proteticos', authMiddleware, async (req, res) => {
             dataRetornoReal: c.data_retorno_real,
             status: c.status,
             observacoesClinics: c.observacoes_clinicas,
+            observacoesTecnicas: c.observacoes_tecnicas,
             valorCombinado: c.valor_combinado,
             totalArquivos: parseInt(c.total_arquivos) || 0,
             mensagensNaoLidas: parseInt(c.mensagens_nao_lidas) || 0,
-            criadoEm: c.criado_em
+            criadoEm: c.criado_em,
+            atualizadoEm: c.atualizado_em
         }));
 
         res.json({
@@ -2464,7 +2469,7 @@ app.get('/api/casos-proteticos/:id', authMiddleware, async (req, res) => {
 // Criar caso
 app.post('/api/casos-proteticos', authMiddleware, async (req, res) => {
     try {
-        const { pacienteId, laboratorioId, profissionalId, tipoTrabalho, tipoTrabalhoDetalhe, dentes, material, materialDetalhe, tecnica, corShade, escalaCor, urgencia, dataEnvio, dataPrometida, observacoesClinics, observacoesTecnicas, valorCombinado } = req.body;
+        const { pacienteId, laboratorioId, profissionalId, tipoTrabalho, tipoTrabalhoDetalhe, tipoPeca, dentes, material, materialDetalhe, tecnica, corShade, escalaCor, urgencia, dataEnvio, dataPrometida, observacoesClinics, observacoesTecnicas, valorCombinado } = req.body;
 
         if (!pacienteId || !tipoTrabalho) {
             return res.status(400).json({ success: false, erro: 'Paciente e tipo de trabalho são obrigatórios' });
@@ -2473,9 +2478,9 @@ app.post('/api/casos-proteticos', authMiddleware, async (req, res) => {
         const codigo = await gerarCodigoCaso(parseInt(req.user.id));
 
         const result = await pool.query(`
-            INSERT INTO casos_proteticos (dentista_id, profissional_id, paciente_id, laboratorio_id, codigo, tipo_trabalho, tipo_trabalho_detalhe, dentes, material, material_detalhe, tecnica, cor_shade, escala_cor, urgencia, data_envio, data_prometida, observacoes_clinicas, observacoes_tecnicas, valor_combinado, status)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, 'criado') RETURNING *
-        `, [parseInt(req.user.id), profissionalId ? parseInt(profissionalId) : null, parseInt(pacienteId), laboratorioId ? parseInt(laboratorioId) : null, codigo, tipoTrabalho, tipoTrabalhoDetalhe || null, dentes || [], material || null, materialDetalhe || null, tecnica || 'convencional', corShade || null, escalaCor || null, urgencia || 'normal', dataEnvio || null, dataPrometida || null, observacoesClinics || null, observacoesTecnicas || null, valorCombinado || null]);
+            INSERT INTO casos_proteticos (dentista_id, profissional_id, paciente_id, laboratorio_id, codigo, tipo_trabalho, tipo_trabalho_detalhe, tipo_peca, dentes, material, material_detalhe, tecnica, cor_shade, escala_cor, urgencia, data_envio, data_prometida, observacoes_clinicas, observacoes_tecnicas, valor_combinado, status)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, 'criado') RETURNING *
+        `, [parseInt(req.user.id), profissionalId ? parseInt(profissionalId) : null, parseInt(pacienteId), laboratorioId ? parseInt(laboratorioId) : null, codigo, tipoTrabalho, tipoTrabalhoDetalhe || null, tipoPeca || 'definitiva', dentes || [], material || null, materialDetalhe || null, tecnica || 'convencional', corShade || null, escalaCor || null, urgencia || 'normal', dataEnvio || null, dataPrometida || null, observacoesClinics || null, observacoesTecnicas || null, valorCombinado || null]);
 
         // Registrar no histórico
         await pool.query(`INSERT INTO casos_status_historico (caso_id, status_novo, alterado_por, tipo_usuario, observacao) VALUES ($1, 'criado', $2, 'dentista', 'Caso criado')`, [result.rows[0].id, req.user.nome || 'Dentista']);

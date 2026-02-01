@@ -108,7 +108,6 @@ async function initDatabase() {
                 responsavel_parentesco VARCHAR(50),
                 responsavel_endereco TEXT,
                 ativo BOOLEAN DEFAULT true,
-                cadastro_completo BOOLEAN DEFAULT false,
                 criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -266,18 +265,12 @@ async function initDatabase() {
             // Campos para Tel. de Recados
             'ALTER TABLE pacientes ADD COLUMN IF NOT EXISTS tel_recados VARCHAR(20)',
             'ALTER TABLE pacientes ADD COLUMN IF NOT EXISTS nome_recado VARCHAR(100)',
-            // Campo para controle de cadastro completo (importação/cadastro parcial)
-            'ALTER TABLE pacientes ADD COLUMN IF NOT EXISTS cadastro_completo BOOLEAN DEFAULT false',
             // Campos de configuração do profissional
             'ALTER TABLE profissionais ADD COLUMN IF NOT EXISTS intervalo_minutos INTEGER DEFAULT 30',
             'ALTER TABLE profissionais ADD COLUMN IF NOT EXISTS hora_entrada TIME DEFAULT \'08:00\'',
             'ALTER TABLE profissionais ADD COLUMN IF NOT EXISTS hora_saida TIME DEFAULT \'18:00\'',
             'ALTER TABLE profissionais ADD COLUMN IF NOT EXISTS almoco_inicio TIME DEFAULT \'12:00\'',
-            'ALTER TABLE profissionais ADD COLUMN IF NOT EXISTS almoco_fim TIME DEFAULT \'13:00\'',
-            // Campo para vincular caso ao profissional que cadastrou
-            'ALTER TABLE casos_proteticos ADD COLUMN IF NOT EXISTS profissional_id INTEGER REFERENCES profissionais(id) ON DELETE SET NULL',
-            'ALTER TABLE casos_proteticos ADD COLUMN IF NOT EXISTS tipo_peca VARCHAR(20) DEFAULT \'definitiva\'',
-            'ALTER TABLE casos_proteticos ADD COLUMN IF NOT EXISTS url_arquivos TEXT'
+            'ALTER TABLE profissionais ADD COLUMN IF NOT EXISTS almoco_fim TIME DEFAULT \'13:00\''
         ];
 
         for (const query of alterQueries) {
@@ -305,154 +298,6 @@ async function initDatabase() {
                 atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         `);
-
-        // ========== TABELAS DE CASOS PROTÉTICOS ==========
-        
-        // Laboratórios parceiros
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS laboratorios (
-                id SERIAL PRIMARY KEY,
-                dentista_id INTEGER NOT NULL REFERENCES dentistas(id) ON DELETE CASCADE,
-                nome VARCHAR(255) NOT NULL,
-                cnpj VARCHAR(20),
-                telefone VARCHAR(20),
-                whatsapp VARCHAR(20),
-                email VARCHAR(255),
-                endereco TEXT,
-                cidade VARCHAR(100),
-                estado VARCHAR(2),
-                cep VARCHAR(10),
-                responsavel_tecnico VARCHAR(255),
-                cro_responsavel VARCHAR(20),
-                especialidades TEXT[],
-                observacoes TEXT,
-                ativo BOOLEAN DEFAULT true,
-                criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-
-        // Casos protéticos
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS casos_proteticos (
-                id SERIAL PRIMARY KEY,
-                dentista_id INTEGER NOT NULL REFERENCES dentistas(id) ON DELETE CASCADE,
-                profissional_id INTEGER REFERENCES profissionais(id) ON DELETE SET NULL,
-                paciente_id INTEGER NOT NULL REFERENCES pacientes(id) ON DELETE CASCADE,
-                laboratorio_id INTEGER REFERENCES laboratorios(id) ON DELETE SET NULL,
-                codigo VARCHAR(20) UNIQUE NOT NULL,
-                tipo_trabalho VARCHAR(50) NOT NULL,
-                tipo_trabalho_detalhe TEXT,
-                tipo_peca VARCHAR(20) DEFAULT 'definitiva',
-                dentes TEXT[],
-                material VARCHAR(50),
-                material_detalhe TEXT,
-                tecnica VARCHAR(20) DEFAULT 'convencional',
-                cor_shade VARCHAR(20),
-                escala_cor VARCHAR(50),
-                urgencia VARCHAR(20) DEFAULT 'normal',
-                data_envio DATE,
-                data_prometida DATE,
-                data_retorno_real DATE,
-                status VARCHAR(30) DEFAULT 'criado',
-                observacoes_clinicas TEXT,
-                observacoes_tecnicas TEXT,
-                url_arquivos TEXT,
-                valor_combinado DECIMAL(10,2),
-                valor_pago DECIMAL(10,2),
-                criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-
-        // Histórico de status dos casos
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS casos_status_historico (
-                id SERIAL PRIMARY KEY,
-                caso_id INTEGER NOT NULL REFERENCES casos_proteticos(id) ON DELETE CASCADE,
-                status_anterior VARCHAR(30),
-                status_novo VARCHAR(30) NOT NULL,
-                alterado_por VARCHAR(100),
-                tipo_usuario VARCHAR(20),
-                observacao TEXT,
-                criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-
-        // Mensagens dos casos
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS casos_mensagens (
-                id SERIAL PRIMARY KEY,
-                caso_id INTEGER NOT NULL REFERENCES casos_proteticos(id) ON DELETE CASCADE,
-                remetente_tipo VARCHAR(20) NOT NULL,
-                remetente_nome VARCHAR(255),
-                mensagem TEXT NOT NULL,
-                lida BOOLEAN DEFAULT false,
-                lida_em TIMESTAMP,
-                criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-
-        // Arquivos dos casos
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS casos_arquivos (
-                id SERIAL PRIMARY KEY,
-                caso_id INTEGER NOT NULL REFERENCES casos_proteticos(id) ON DELETE CASCADE,
-                tipo_arquivo VARCHAR(20) NOT NULL,
-                nome_arquivo VARCHAR(255) NOT NULL,
-                nome_original VARCHAR(255),
-                tamanho_bytes BIGINT,
-                mime_type VARCHAR(100),
-                url_arquivo TEXT NOT NULL,
-                versao INTEGER DEFAULT 1,
-                descricao TEXT,
-                enviado_por VARCHAR(20),
-                criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-
-        // Índices para performance
-        const indicesCasos = [
-            'CREATE INDEX IF NOT EXISTS idx_laboratorios_dentista ON laboratorios(dentista_id)',
-            'CREATE INDEX IF NOT EXISTS idx_casos_dentista ON casos_proteticos(dentista_id)',
-            'CREATE INDEX IF NOT EXISTS idx_casos_paciente ON casos_proteticos(paciente_id)',
-            'CREATE INDEX IF NOT EXISTS idx_casos_status ON casos_proteticos(status)',
-            'CREATE INDEX IF NOT EXISTS idx_casos_data_prometida ON casos_proteticos(data_prometida)'
-        ];
-        for (const idx of indicesCasos) {
-            try { await pool.query(idx); } catch (e) {}
-        }
-
-        // ============ MÓDULO FINANÇAS - TABELA DE PREÇOS DOS LABORATÓRIOS ============
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS laboratorios_precos (
-                id SERIAL PRIMARY KEY,
-                laboratorio_id INTEGER NOT NULL REFERENCES laboratorios(id) ON DELETE CASCADE,
-                material VARCHAR(100) NOT NULL,
-                procedimento VARCHAR(200) NOT NULL,
-                valor DECIMAL(10,2) NOT NULL,
-                observacao TEXT,
-                ativo BOOLEAN DEFAULT true,
-                criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        
-        // Índices para preços
-        try {
-            await pool.query('CREATE INDEX IF NOT EXISTS idx_lab_precos_lab ON laboratorios_precos(laboratorio_id)');
-            await pool.query('CREATE INDEX IF NOT EXISTS idx_lab_precos_material ON laboratorios_precos(material)');
-        } catch (e) {}
-
-        // ============ MIGRAÇÕES - CAMPOS DE CUSTO NOS CASOS ============
-        const migracoesFinancas = [
-            "ALTER TABLE casos_proteticos ADD COLUMN IF NOT EXISTS valor_custo DECIMAL(10,2)",
-            "ALTER TABLE casos_proteticos ADD COLUMN IF NOT EXISTS data_finalizado TIMESTAMP",
-            "ALTER TABLE casos_proteticos ADD COLUMN IF NOT EXISTS material_preco_id INTEGER REFERENCES laboratorios_precos(id) ON DELETE SET NULL"
-        ];
-        for (const mig of migracoesFinancas) {
-            try { await pool.query(mig); } catch (e) {}
-        }
 
         console.log('Banco de dados inicializado!');
     } catch (error) {
@@ -1116,66 +961,10 @@ app.put('/api/config-clinica', authMiddleware, async (req, res) => {
 // Listar pacientes
 app.get('/api/pacientes', authMiddleware, async (req, res) => {
     try {
-        // Paginação: limit e offset (padrão: 50 por página)
-        const limit = parseInt(req.query.limit) || 50;
-        const offset = parseInt(req.query.offset) || 0;
-        const busca = req.query.busca || '';
-        
-        // Query base
-        let query = `SELECT * FROM pacientes WHERE dentista_id = $1 AND (ativo = true OR ativo IS NULL)`;
-        let countQuery = `SELECT COUNT(*) FROM pacientes WHERE dentista_id = $1 AND (ativo = true OR ativo IS NULL)`;
-        let params = [parseInt(req.user.id)];
-        let countParams = [parseInt(req.user.id)];
-        
-        // Se tiver busca, filtrar (ignorando acentos)
-        if (busca) {
-            // Normaliza a busca removendo acentos
-            const buscaNorm = busca.toLowerCase()
-                .normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-            query += ` AND (
-                LOWER(TRANSLATE(nome, 'áàãâäéèêëíìîïóòõôöúùûüçñÁÀÃÂÄÉÈÊËÍÌÎÏÓÒÕÔÖÚÙÛÜÇÑ', 'aaaaaeeeeiiiiooooouuuucnAAAAAEEEEIIIIOOOOOUUUUCN')) LIKE $2 
-                OR cpf LIKE $2 
-                OR telefone LIKE $2 
-                OR celular LIKE $2
-            )`;
-            countQuery += ` AND (
-                LOWER(TRANSLATE(nome, 'áàãâäéèêëíìîïóòõôöúùûüçñÁÀÃÂÄÉÈÊËÍÌÎÏÓÒÕÔÖÚÙÛÜÇÑ', 'aaaaaeeeeiiiiooooouuuucnAAAAAEEEEIIIIOOOOOUUUUCN')) LIKE $2 
-                OR cpf LIKE $2 
-                OR telefone LIKE $2 
-                OR celular LIKE $2
-            )`;
-            params.push('%' + buscaNorm + '%');
-            countParams.push('%' + buscaNorm + '%');
-        }
-        
-        // Ordenar e paginar
-        query += ` ORDER BY nome ASC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
-        params.push(limit, offset);
-        
-        // Queries de estatísticas (sempre retorna totais reais)
-        const statsQueries = {
-            total: `SELECT COUNT(*) FROM pacientes WHERE dentista_id = $1 AND (ativo = true OR ativo IS NULL)`,
-            completos: `SELECT COUNT(*) FROM pacientes WHERE dentista_id = $1 AND (ativo = true OR ativo IS NULL) AND cadastro_completo = true`,
-            incompletos: `SELECT COUNT(*) FROM pacientes WHERE dentista_id = $1 AND (ativo = true OR ativo IS NULL) AND (cadastro_completo = false OR cadastro_completo IS NULL)`,
-            menores: `SELECT COUNT(*) FROM pacientes WHERE dentista_id = $1 AND (ativo = true OR ativo IS NULL) AND menor_idade = true`
-        };
-        
-        // Executar todas as queries em paralelo
-        const [result, countResult, completosResult, incompletosResult, menoresResult] = await Promise.all([
-            pool.query(query, params),
-            pool.query(countQuery, countParams),
-            pool.query(statsQueries.completos, [parseInt(req.user.id)]),
-            pool.query(statsQueries.incompletos, [parseInt(req.user.id)]),
-            pool.query(statsQueries.menores, [parseInt(req.user.id)])
-        ]);
-        
-        const total = parseInt(countResult.rows[0].count);
-        const stats = {
-            total: parseInt(countResult.rows[0].count),
-            completos: parseInt(completosResult.rows[0].count),
-            incompletos: parseInt(incompletosResult.rows[0].count),
-            menores: parseInt(menoresResult.rows[0].count)
-        };
+        const result = await pool.query(
+            `SELECT * FROM pacientes WHERE dentista_id = $1 AND (ativo = true OR ativo IS NULL) ORDER BY nome ASC`,
+            [parseInt(req.user.id)]
+        );
 
         const pacientes = result.rows.map(p => ({
             id: p.id.toString(),
@@ -1211,19 +1000,10 @@ app.get('/api/pacientes', authMiddleware, async (req, res) => {
             pais: p.pais,
             nacionalidade: p.nacionalidade,
             tipo_documento: p.tipo_documento || 'cpf',
-            cadastroCompleto: p.cadastro_completo || false,
             criadoEm: p.criado_em
         }));
 
-        res.json({ 
-            success: true, 
-            pacientes, 
-            total,
-            stats,
-            limit,
-            offset,
-            hasMore: offset + pacientes.length < total
-        });
+        res.json({ success: true, pacientes, total: pacientes.length });
     } catch (error) {
         console.error('Erro listar pacientes:', error);
         res.status(500).json({ success: false, erro: 'Erro ao listar pacientes' });
@@ -1328,29 +1108,52 @@ app.post('/api/pacientes', authMiddleware, async (req, res) => {
             tel_recados, nome_recado
         } = req.body;
 
-        // ========== VALIDAÇÃO MÍNIMA ==========
+        // ========== VALIDAÇÕES OBRIGATÓRIAS PARA NFS-e ==========
         
         // Nome é sempre obrigatório
-        if (!nome || nome.trim().length < 2) {
-            return res.status(400).json({ success: false, erro: 'Nome é obrigatório (mínimo 2 caracteres)' });
+        if (!nome || nome.trim().length < 3) {
+            return res.status(400).json({ success: false, erro: 'Nome completo é obrigatório (mínimo 3 caracteres)' });
         }
         
-        // ========== CALCULAR SE CADASTRO ESTÁ COMPLETO ==========
-        // Cadastro completo = Nome + CPF (ou passaporte) + CEP
-        // Sem esses dados, não pode emitir NFS-e
-        
-        let cadastroCompleto = true;
-        
-        // Verificar documento (CPF ou passaporte)
-        if (estrangeiro) {
-            if (!passaporte) cadastroCompleto = false;
-        } else {
-            if (!cpf) cadastroCompleto = false;
+        // CPF ou Passaporte obrigatório
+        if (!estrangeiro && !cpf) {
+            return res.status(400).json({ success: false, erro: 'CPF é obrigatório para emissão de NFS-e' });
+        }
+        if (estrangeiro && !passaporte) {
+            return res.status(400).json({ success: false, erro: 'Passaporte é obrigatório para pacientes estrangeiros' });
         }
         
-        // Verificar CEP
+        // Endereço completo obrigatório para NFS-e
         if (!cep) {
-            cadastroCompleto = false;
+            return res.status(400).json({ success: false, erro: 'CEP é obrigatório para emissão de NFS-e' });
+        }
+        if (!endereco) {
+            return res.status(400).json({ success: false, erro: 'Endereço é obrigatório para emissão de NFS-e' });
+        }
+        if (!numero) {
+            return res.status(400).json({ success: false, erro: 'Número é obrigatório para emissão de NFS-e' });
+        }
+        if (!bairro) {
+            return res.status(400).json({ success: false, erro: 'Bairro é obrigatório para emissão de NFS-e' });
+        }
+        if (!cidade) {
+            return res.status(400).json({ success: false, erro: 'Cidade é obrigatória para emissão de NFS-e' });
+        }
+        if (!estado) {
+            return res.status(400).json({ success: false, erro: 'Estado é obrigatório para emissão de NFS-e' });
+        }
+        
+        // Para menores de idade, responsável com CPF é obrigatório
+        if (menorIdade) {
+            if (!responsavelNome) {
+                return res.status(400).json({ success: false, erro: 'Nome do responsável é obrigatório para menores de idade' });
+            }
+            if (!responsavelCpf) {
+                return res.status(400).json({ success: false, erro: 'CPF do responsável é obrigatório para emissão de NFS-e de menores' });
+            }
+            if (!responsavelParentesco) {
+                return res.status(400).json({ success: false, erro: 'Parentesco do responsável é obrigatório' });
+            }
         }
 
         const result = await pool.query(
@@ -1361,8 +1164,8 @@ app.post('/api/pacientes', authMiddleware, async (req, res) => {
                 menor_idade, responsavel_nome, responsavel_cpf, responsavel_rg,
                 responsavel_telefone, responsavel_email, responsavel_parentesco, responsavel_endereco,
                 estrangeiro, passaporte, pais, nacionalidade, tipo_documento,
-                tel_recados, nome_recado, cadastro_completo
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35)
+                tel_recados, nome_recado
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34)
             RETURNING *`,
             [
                 parseInt(req.user.id), nome, cpf || null, rg || null,
@@ -1373,14 +1176,14 @@ app.post('/api/pacientes', authMiddleware, async (req, res) => {
                 menorIdade || false, responsavelNome || null, responsavelCpf || null, responsavelRg || null,
                 responsavelTelefone || null, responsavelEmail || null, responsavelParentesco || null, responsavelEndereco || null,
                 estrangeiro || false, passaporte || null, pais || null, nacionalidade || null, tipo_documento || 'cpf',
-                tel_recados || null, nome_recado || null, cadastroCompleto
+                tel_recados || null, nome_recado || null
             ]
         );
 
         const p = result.rows[0];
         res.status(201).json({
             success: true,
-            message: cadastroCompleto ? 'Paciente cadastrado com sucesso!' : 'Paciente cadastrado (cadastro incompleto - não pode emitir NFS-e)',
+            message: 'Paciente cadastrado com sucesso!',
             paciente: {
                 id: p.id.toString(),
                 nome: p.nome,
@@ -1394,8 +1197,7 @@ app.post('/api/pacientes', authMiddleware, async (req, res) => {
                 passaporte: p.passaporte,
                 pais: p.pais,
                 nacionalidade: p.nacionalidade,
-                tipo_documento: p.tipo_documento,
-                cadastroCompleto: p.cadastro_completo || false
+                tipo_documento: p.tipo_documento
             }
         });
     } catch (error) {
@@ -1413,25 +1215,8 @@ app.put('/api/pacientes/:id', authMiddleware, async (req, res) => {
             endereco, numero, complemento, bairro, cidade, estado, cep,
             convenio, numeroConvenio, observacoes,
             menorIdade, responsavelNome, responsavelCpf, responsavelRg,
-            responsavelTelefone, responsavelEmail, responsavelParentesco, responsavelEndereco,
-            estrangeiro, passaporte, pais, nacionalidade, tipo_documento
+            responsavelTelefone, responsavelEmail, responsavelParentesco, responsavelEndereco
         } = req.body;
-
-        // ========== RECALCULAR SE CADASTRO ESTÁ COMPLETO ==========
-        // Cadastro completo = Nome + CPF (ou passaporte) + CEP
-        let cadastroCompleto = true;
-        
-        // Verificar documento (CPF ou passaporte)
-        if (estrangeiro) {
-            if (!passaporte) cadastroCompleto = false;
-        } else {
-            if (!cpf) cadastroCompleto = false;
-        }
-        
-        // Verificar CEP
-        if (!cep) {
-            cadastroCompleto = false;
-        }
 
         const result = await pool.query(
             `UPDATE pacientes SET
@@ -1441,10 +1226,8 @@ app.put('/api/pacientes/:id', authMiddleware, async (req, res) => {
                 convenio = $16, numero_convenio = $17, observacoes = $18,
                 menor_idade = $19, responsavel_nome = $20, responsavel_cpf = $21, responsavel_rg = $22,
                 responsavel_telefone = $23, responsavel_email = $24, responsavel_parentesco = $25, responsavel_endereco = $26,
-                estrangeiro = $27, passaporte = $28, pais = $29, nacionalidade = $30, tipo_documento = $31,
-                cadastro_completo = $32,
                 atualizado_em = CURRENT_TIMESTAMP
-            WHERE id = $33 AND dentista_id = $34 RETURNING *`,
+            WHERE id = $27 AND dentista_id = $28 RETURNING *`,
             [
                 nome, cpf || null, rg || null, dataNascimento || null, sexo || null,
                 telefone || null, celular || null, email || null, endereco || null, numero || null,
@@ -1452,8 +1235,6 @@ app.put('/api/pacientes/:id', authMiddleware, async (req, res) => {
                 convenio || null, numeroConvenio || null, observacoes || null,
                 menorIdade || false, responsavelNome || null, responsavelCpf || null, responsavelRg || null,
                 responsavelTelefone || null, responsavelEmail || null, responsavelParentesco || null, responsavelEndereco || null,
-                estrangeiro || false, passaporte || null, pais || null, nacionalidade || null, tipo_documento || 'cpf',
-                cadastroCompleto,
                 parseInt(id), parseInt(req.user.id)
             ]
         );
@@ -1462,46 +1243,7 @@ app.put('/api/pacientes/:id', authMiddleware, async (req, res) => {
             return res.status(404).json({ success: false, erro: 'Paciente não encontrado' });
         }
 
-        const p = result.rows[0];
-        res.json({ 
-            success: true, 
-            message: cadastroCompleto ? 'Paciente atualizado!' : 'Paciente atualizado (cadastro incompleto)',
-            paciente: {
-                id: p.id.toString(),
-                nome: p.nome,
-                cpf: p.cpf,
-                rg: p.rg,
-                dataNascimento: p.data_nascimento,
-                sexo: p.sexo,
-                telefone: p.telefone,
-                celular: p.celular,
-                email: p.email,
-                endereco: p.endereco,
-                numero: p.numero,
-                complemento: p.complemento,
-                bairro: p.bairro,
-                cidade: p.cidade,
-                estado: p.estado,
-                cep: p.cep,
-                convenio: p.convenio,
-                numeroConvenio: p.numero_convenio,
-                observacoes: p.observacoes,
-                menorIdade: p.menor_idade || false,
-                responsavelNome: p.responsavel_nome,
-                responsavelCpf: p.responsavel_cpf,
-                responsavelRg: p.responsavel_rg,
-                responsavelTelefone: p.responsavel_telefone,
-                responsavelEmail: p.responsavel_email,
-                responsavelParentesco: p.responsavel_parentesco,
-                responsavelEndereco: p.responsavel_endereco,
-                estrangeiro: p.estrangeiro || false,
-                passaporte: p.passaporte,
-                pais: p.pais,
-                nacionalidade: p.nacionalidade,
-                tipo_documento: p.tipo_documento || 'cpf',
-                cadastroCompleto: p.cadastro_completo || false
-            }
-        });
+        res.json({ success: true, message: 'Paciente atualizado!' });
     } catch (error) {
         console.error('Erro atualizar paciente:', error);
         res.status(500).json({ success: false, erro: 'Erro ao atualizar paciente' });
@@ -2139,28 +1881,6 @@ app.post('/api/notas', authMiddleware, async (req, res) => {
             return res.status(400).json({ success: false, erro: 'Valor é obrigatório' });
         }
 
-        // ========== VERIFICAR SE PACIENTE TEM CADASTRO COMPLETO ==========
-        if (pacienteId) {
-            const pacienteResult = await pool.query(
-                'SELECT nome, cadastro_completo FROM pacientes WHERE id = $1 AND dentista_id = $2',
-                [parseInt(pacienteId), parseInt(req.user.id)]
-            );
-            
-            if (pacienteResult.rows.length === 0) {
-                return res.status(404).json({ success: false, erro: 'Paciente não encontrado' });
-            }
-            
-            const paciente = pacienteResult.rows[0];
-            if (!paciente.cadastro_completo) {
-                return res.status(400).json({ 
-                    success: false, 
-                    erro: `Para emitir NFS-e para "${paciente.nome}", é necessário completar o cadastro (CPF e endereço)`,
-                    cadastroIncompleto: true,
-                    pacienteId: pacienteId
-                });
-            }
-        }
-
         // Gerar número da nota (simplificado)
         const countResult = await pool.query('SELECT COUNT(*) FROM notas_fiscais WHERE dentista_id = $1', [parseInt(req.user.id)]);
         const numero = 'NF' + String(parseInt(countResult.rows[0].count) + 1).padStart(6, '0');
@@ -2215,834 +1935,6 @@ app.get('/api/dashboard', authMiddleware, async (req, res) => {
         });
     } catch (error) {
         res.status(500).json({ success: false, erro: 'Erro ao carregar dashboard' });
-    }
-});
-
-// ==============================================================================
-// ROTAS DE LABORATÓRIOS
-// ==============================================================================
-
-// Listar laboratórios
-app.get('/api/laboratorios', authMiddleware, async (req, res) => {
-    try {
-        const result = await pool.query(
-            `SELECT l.*,
-                (SELECT COUNT(*) FROM casos_proteticos WHERE laboratorio_id = l.id) as total_casos,
-                (SELECT COUNT(*) FROM casos_proteticos WHERE laboratorio_id = l.id AND status = 'finalizado' 
-                    AND data_retorno_real <= data_prometida) as entregas_no_prazo
-            FROM laboratorios l
-            WHERE l.dentista_id = $1 AND l.ativo = true
-            ORDER BY l.nome ASC`,
-            [parseInt(req.user.id)]
-        );
-
-        const laboratorios = result.rows.map(l => ({
-            id: l.id.toString(),
-            nome: l.nome,
-            cnpj: l.cnpj,
-            telefone: l.telefone,
-            whatsapp: l.whatsapp,
-            email: l.email,
-            endereco: l.endereco,
-            cidade: l.cidade,
-            estado: l.estado,
-            responsavelTecnico: l.responsavel_tecnico,
-            croResponsavel: l.cro_responsavel,
-            especialidades: l.especialidades || [],
-            totalCasos: parseInt(l.total_casos) || 0,
-            entregasNoPrazo: parseInt(l.entregas_no_prazo) || 0,
-            percentualNoPrazo: l.total_casos > 0 ? Math.round((l.entregas_no_prazo / l.total_casos) * 100) : 0
-        }));
-
-        res.json({ success: true, laboratorios });
-    } catch (error) {
-        console.error('Erro ao listar laboratórios:', error);
-        res.status(500).json({ success: false, erro: 'Erro ao listar laboratórios' });
-    }
-});
-
-// Criar laboratório
-app.post('/api/laboratorios', authMiddleware, async (req, res) => {
-    try {
-        const { nome, cnpj, telefone, whatsapp, email, endereco, cidade, estado, cep, responsavelTecnico, croResponsavel, especialidades, observacoes } = req.body;
-
-        if (!nome) {
-            return res.status(400).json({ success: false, erro: 'Nome é obrigatório' });
-        }
-
-        const result = await pool.query(
-            `INSERT INTO laboratorios (dentista_id, nome, cnpj, telefone, whatsapp, email, endereco, cidade, estado, cep, responsavel_tecnico, cro_responsavel, especialidades, observacoes)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING *`,
-            [parseInt(req.user.id), nome, cnpj || null, telefone || null, whatsapp || null, email || null, endereco || null, cidade || null, estado || null, cep || null, responsavelTecnico || null, croResponsavel || null, especialidades || [], observacoes || null]
-        );
-
-        res.json({ success: true, laboratorio: { id: result.rows[0].id.toString(), nome } });
-    } catch (error) {
-        console.error('Erro ao criar laboratório:', error);
-        res.status(500).json({ success: false, erro: 'Erro ao criar laboratório' });
-    }
-});
-
-// Atualizar laboratório
-app.put('/api/laboratorios/:id', authMiddleware, async (req, res) => {
-    try {
-        const { id } = req.params;
-        const { nome, cnpj, telefone, whatsapp, email, endereco, cidade, estado, cep, responsavelTecnico, croResponsavel, especialidades, observacoes } = req.body;
-
-        const result = await pool.query(
-            `UPDATE laboratorios SET nome = COALESCE($1, nome), cnpj = $2, telefone = $3, whatsapp = $4, email = $5, endereco = $6, cidade = $7, estado = $8, cep = $9, responsavel_tecnico = $10, cro_responsavel = $11, especialidades = $12, observacoes = $13, atualizado_em = CURRENT_TIMESTAMP
-             WHERE id = $14 AND dentista_id = $15 RETURNING *`,
-            [nome, cnpj || null, telefone || null, whatsapp || null, email || null, endereco || null, cidade || null, estado || null, cep || null, responsavelTecnico || null, croResponsavel || null, especialidades || [], observacoes || null, parseInt(id), parseInt(req.user.id)]
-        );
-
-        if (result.rows.length === 0) {
-            return res.status(404).json({ success: false, erro: 'Laboratório não encontrado' });
-        }
-
-        res.json({ success: true, message: 'Laboratório atualizado!' });
-    } catch (error) {
-        console.error('Erro ao atualizar laboratório:', error);
-        res.status(500).json({ success: false, erro: 'Erro ao atualizar laboratório' });
-    }
-});
-
-// Excluir laboratório (soft delete)
-app.delete('/api/laboratorios/:id', authMiddleware, async (req, res) => {
-    try {
-        await pool.query('UPDATE laboratorios SET ativo = false WHERE id = $1 AND dentista_id = $2', [parseInt(req.params.id), parseInt(req.user.id)]);
-        res.json({ success: true, message: 'Laboratório removido!' });
-    } catch (error) {
-        console.error('Erro ao excluir laboratório:', error);
-        res.status(500).json({ success: false, erro: 'Erro ao excluir laboratório' });
-    }
-});
-
-// ==============================================================================
-// ROTAS DE PREÇOS DOS LABORATÓRIOS (MÓDULO FINANÇAS)
-// ==============================================================================
-
-// Listar preços de um laboratório
-app.get('/api/laboratorios/:id/precos', authMiddleware, async (req, res) => {
-    try {
-        const labId = parseInt(req.params.id);
-        
-        // Verificar se o laboratório pertence ao dentista
-        const labCheck = await pool.query(
-            'SELECT id FROM laboratorios WHERE id = $1 AND dentista_id = $2',
-            [labId, parseInt(req.user.id)]
-        );
-        if (labCheck.rows.length === 0) {
-            return res.status(404).json({ success: false, erro: 'Laboratório não encontrado' });
-        }
-
-        const result = await pool.query(
-            `SELECT * FROM laboratorios_precos 
-             WHERE laboratorio_id = $1 AND ativo = true
-             ORDER BY material ASC, procedimento ASC`,
-            [labId]
-        );
-
-        const precos = result.rows.map(p => ({
-            id: p.id.toString(),
-            material: p.material,
-            procedimento: p.procedimento,
-            valor: parseFloat(p.valor),
-            observacao: p.observacao
-        }));
-
-        // Agrupar por material
-        const porMaterial = {};
-        precos.forEach(p => {
-            if (!porMaterial[p.material]) {
-                porMaterial[p.material] = [];
-            }
-            porMaterial[p.material].push(p);
-        });
-
-        res.json({ success: true, precos, porMaterial });
-    } catch (error) {
-        console.error('Erro ao listar preços:', error);
-        res.status(500).json({ success: false, erro: 'Erro ao listar preços' });
-    }
-});
-
-// Adicionar preço ao laboratório
-app.post('/api/laboratorios/:id/precos', authMiddleware, async (req, res) => {
-    try {
-        const labId = parseInt(req.params.id);
-        const { material, procedimento, valor, observacao } = req.body;
-
-        if (!material || !procedimento || valor === undefined) {
-            return res.status(400).json({ success: false, erro: 'Material, procedimento e valor são obrigatórios' });
-        }
-
-        // Verificar se o laboratório pertence ao dentista
-        const labCheck = await pool.query(
-            'SELECT id FROM laboratorios WHERE id = $1 AND dentista_id = $2',
-            [labId, parseInt(req.user.id)]
-        );
-        if (labCheck.rows.length === 0) {
-            return res.status(404).json({ success: false, erro: 'Laboratório não encontrado' });
-        }
-
-        const result = await pool.query(
-            `INSERT INTO laboratorios_precos (laboratorio_id, material, procedimento, valor, observacao)
-             VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-            [labId, material.trim(), procedimento.trim(), parseFloat(valor), observacao || null]
-        );
-
-        res.json({ 
-            success: true, 
-            preco: {
-                id: result.rows[0].id.toString(),
-                material: result.rows[0].material,
-                procedimento: result.rows[0].procedimento,
-                valor: parseFloat(result.rows[0].valor),
-                observacao: result.rows[0].observacao
-            }
-        });
-    } catch (error) {
-        console.error('Erro ao adicionar preço:', error);
-        res.status(500).json({ success: false, erro: 'Erro ao adicionar preço' });
-    }
-});
-
-// Adicionar múltiplos preços ao laboratório
-app.post('/api/laboratorios/:id/precos/lote', authMiddleware, async (req, res) => {
-    try {
-        const labId = parseInt(req.params.id);
-        const { precos } = req.body;
-
-        if (!precos || !Array.isArray(precos) || precos.length === 0) {
-            return res.status(400).json({ success: false, erro: 'Lista de preços é obrigatória' });
-        }
-
-        // Verificar se o laboratório pertence ao dentista
-        const labCheck = await pool.query(
-            'SELECT id FROM laboratorios WHERE id = $1 AND dentista_id = $2',
-            [labId, parseInt(req.user.id)]
-        );
-        if (labCheck.rows.length === 0) {
-            return res.status(404).json({ success: false, erro: 'Laboratório não encontrado' });
-        }
-
-        const inseridos = [];
-        for (const p of precos) {
-            if (p.material && p.procedimento && p.valor !== undefined) {
-                const result = await pool.query(
-                    `INSERT INTO laboratorios_precos (laboratorio_id, material, procedimento, valor, observacao)
-                     VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-                    [labId, p.material.trim(), p.procedimento.trim(), parseFloat(p.valor), p.observacao || null]
-                );
-                inseridos.push({
-                    id: result.rows[0].id.toString(),
-                    material: result.rows[0].material,
-                    procedimento: result.rows[0].procedimento,
-                    valor: parseFloat(result.rows[0].valor)
-                });
-            }
-        }
-
-        res.json({ success: true, inseridos: inseridos.length, precos: inseridos });
-    } catch (error) {
-        console.error('Erro ao adicionar preços em lote:', error);
-        res.status(500).json({ success: false, erro: 'Erro ao adicionar preços' });
-    }
-});
-
-// Atualizar preço
-app.put('/api/laboratorios-precos/:id', authMiddleware, async (req, res) => {
-    try {
-        const precoId = parseInt(req.params.id);
-        const { material, procedimento, valor, observacao } = req.body;
-
-        // Verificar se o preço pertence a um lab do dentista
-        const check = await pool.query(
-            `SELECT lp.id FROM laboratorios_precos lp
-             JOIN laboratorios l ON l.id = lp.laboratorio_id
-             WHERE lp.id = $1 AND l.dentista_id = $2`,
-            [precoId, parseInt(req.user.id)]
-        );
-        if (check.rows.length === 0) {
-            return res.status(404).json({ success: false, erro: 'Preço não encontrado' });
-        }
-
-        await pool.query(
-            `UPDATE laboratorios_precos SET 
-                material = COALESCE($1, material),
-                procedimento = COALESCE($2, procedimento),
-                valor = COALESCE($3, valor),
-                observacao = $4,
-                atualizado_em = CURRENT_TIMESTAMP
-             WHERE id = $5`,
-            [material, procedimento, valor !== undefined ? parseFloat(valor) : null, observacao, precoId]
-        );
-
-        res.json({ success: true, message: 'Preço atualizado!' });
-    } catch (error) {
-        console.error('Erro ao atualizar preço:', error);
-        res.status(500).json({ success: false, erro: 'Erro ao atualizar preço' });
-    }
-});
-
-// Excluir preço (soft delete)
-app.delete('/api/laboratorios-precos/:id', authMiddleware, async (req, res) => {
-    try {
-        const precoId = parseInt(req.params.id);
-
-        // Verificar se o preço pertence a um lab do dentista
-        const check = await pool.query(
-            `SELECT lp.id FROM laboratorios_precos lp
-             JOIN laboratorios l ON l.id = lp.laboratorio_id
-             WHERE lp.id = $1 AND l.dentista_id = $2`,
-            [precoId, parseInt(req.user.id)]
-        );
-        if (check.rows.length === 0) {
-            return res.status(404).json({ success: false, erro: 'Preço não encontrado' });
-        }
-
-        await pool.query('UPDATE laboratorios_precos SET ativo = false WHERE id = $1', [precoId]);
-        res.json({ success: true, message: 'Preço removido!' });
-    } catch (error) {
-        console.error('Erro ao excluir preço:', error);
-        res.status(500).json({ success: false, erro: 'Erro ao excluir preço' });
-    }
-});
-
-// ==============================================================================
-// ROTAS DE FINANÇAS (CASOS FINALIZADOS)
-// ==============================================================================
-
-// Listar finanças (casos finalizados com custos)
-app.get('/api/financas', authMiddleware, async (req, res) => {
-    try {
-        const { dataInicio, dataFim, laboratorioId, profissionalId } = req.query;
-
-        let query = `
-            SELECT cp.id, cp.codigo, cp.tipo_trabalho, cp.tipo_trabalho_detalhe, cp.dentes, 
-                   cp.material, cp.valor_custo, cp.data_finalizado, cp.criado_em,
-                   p.nome as paciente_nome,
-                   l.id as lab_id, l.nome as laboratorio_nome,
-                   prof.id as prof_id, prof.nome as profissional_nome
-            FROM casos_proteticos cp
-            LEFT JOIN pacientes p ON p.id = cp.paciente_id
-            LEFT JOIN laboratorios l ON l.id = cp.laboratorio_id
-            LEFT JOIN profissionais prof ON prof.id = cp.profissional_id
-            WHERE cp.dentista_id = $1 AND cp.status = 'finalizado'
-        `;
-        const params = [parseInt(req.user.id)];
-        let paramCount = 1;
-
-        // Filtro por data de finalização
-        if (dataInicio) {
-            paramCount++;
-            query += ` AND cp.data_finalizado >= $${paramCount}`;
-            params.push(dataInicio);
-        }
-        if (dataFim) {
-            paramCount++;
-            query += ` AND cp.data_finalizado <= $${paramCount}::date + interval '1 day'`;
-            params.push(dataFim);
-        }
-
-        // Filtro por laboratório
-        if (laboratorioId) {
-            paramCount++;
-            query += ` AND cp.laboratorio_id = $${paramCount}`;
-            params.push(parseInt(laboratorioId));
-        }
-
-        // Filtro por profissional
-        if (profissionalId) {
-            paramCount++;
-            query += ` AND cp.profissional_id = $${paramCount}`;
-            params.push(parseInt(profissionalId));
-        }
-
-        query += ' ORDER BY cp.data_finalizado DESC';
-
-        const result = await pool.query(query, params);
-
-        const registros = result.rows.map(r => ({
-            id: r.id.toString(),
-            codigo: r.codigo,
-            tipoTrabalho: r.tipo_trabalho,
-            tipoTrabalhoDetalhe: r.tipo_trabalho_detalhe,
-            dentes: r.dentes || [],
-            qtdDentes: (r.dentes || []).length,
-            material: r.material,
-            valorCusto: r.valor_custo ? parseFloat(r.valor_custo) : null,
-            dataFinalizado: r.data_finalizado,
-            criadoEm: r.criado_em,
-            pacienteNome: r.paciente_nome,
-            laboratorioId: r.lab_id ? r.lab_id.toString() : null,
-            laboratorioNome: r.laboratorio_nome,
-            profissionalId: r.prof_id ? r.prof_id.toString() : null,
-            profissionalNome: r.profissional_nome
-        }));
-
-        // Calcular totais
-        const total = registros.reduce((sum, r) => sum + (r.valorCusto || 0), 0);
-        
-        // Totais por laboratório
-        const porLaboratorio = {};
-        registros.forEach(r => {
-            if (r.laboratorioNome) {
-                if (!porLaboratorio[r.laboratorioNome]) {
-                    porLaboratorio[r.laboratorioNome] = { total: 0, quantidade: 0 };
-                }
-                porLaboratorio[r.laboratorioNome].total += r.valorCusto || 0;
-                porLaboratorio[r.laboratorioNome].quantidade++;
-            }
-        });
-
-        // Totais por profissional
-        const porProfissional = {};
-        registros.forEach(r => {
-            if (r.profissionalNome) {
-                if (!porProfissional[r.profissionalNome]) {
-                    porProfissional[r.profissionalNome] = { total: 0, quantidade: 0 };
-                }
-                porProfissional[r.profissionalNome].total += r.valorCusto || 0;
-                porProfissional[r.profissionalNome].quantidade++;
-            }
-        });
-
-        res.json({ 
-            success: true, 
-            registros,
-            resumo: {
-                total,
-                quantidade: registros.length,
-                porLaboratorio,
-                porProfissional
-            }
-        });
-    } catch (error) {
-        console.error('Erro ao listar finanças:', error);
-        res.status(500).json({ success: false, erro: 'Erro ao listar finanças' });
-    }
-});
-
-// ==============================================================================
-// ROTAS DE CASOS PROTÉTICOS
-// ==============================================================================
-
-// Função para gerar código do caso
-async function gerarCodigoCaso(dentistaId) {
-    const ano = new Date().getFullYear();
-    const result = await pool.query(
-        `SELECT COUNT(*) + 1 as seq FROM casos_proteticos WHERE dentista_id = $1 AND codigo LIKE $2`,
-        [dentistaId, `CP-${ano}-%`]
-    );
-    const seq = result.rows[0].seq;
-    return `CP-${ano}-${String(seq).padStart(4, '0')}`;
-}
-
-// Listar casos
-app.get('/api/casos-proteticos', authMiddleware, async (req, res) => {
-    try {
-        const { status, laboratorio_id, paciente_id, profissional_id, urgencia, limit = 50, offset = 0 } = req.query;
-
-        let query = `
-            SELECT cp.*, p.nome as paciente_nome, l.nome as laboratorio_nome, l.whatsapp as laboratorio_whatsapp,
-                prof.nome as profissional_nome, prof.icone as profissional_icone,
-                (SELECT COUNT(*) FROM casos_arquivos WHERE caso_id = cp.id) as total_arquivos,
-                (SELECT COUNT(*) FROM casos_mensagens WHERE caso_id = cp.id AND lida = false AND remetente_tipo = 'laboratorio') as mensagens_nao_lidas
-            FROM casos_proteticos cp
-            LEFT JOIN pacientes p ON p.id = cp.paciente_id
-            LEFT JOIN laboratorios l ON l.id = cp.laboratorio_id
-            LEFT JOIN profissionais prof ON prof.id = cp.profissional_id
-            WHERE cp.dentista_id = $1
-        `;
-        let params = [parseInt(req.user.id)];
-        let paramIndex = 2;
-
-        if (status) { query += ` AND cp.status = $${paramIndex}`; params.push(status); paramIndex++; }
-        if (laboratorio_id) { query += ` AND cp.laboratorio_id = $${paramIndex}`; params.push(parseInt(laboratorio_id)); paramIndex++; }
-        if (paciente_id) { query += ` AND cp.paciente_id = $${paramIndex}`; params.push(parseInt(paciente_id)); paramIndex++; }
-        if (profissional_id) { query += ` AND cp.profissional_id = $${paramIndex}`; params.push(parseInt(profissional_id)); paramIndex++; }
-        if (urgencia) { query += ` AND cp.urgencia = $${paramIndex}`; params.push(urgencia); paramIndex++; }
-
-        query += ` ORDER BY cp.criado_em DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
-        params.push(parseInt(limit), parseInt(offset));
-
-        const result = await pool.query(query, params);
-
-        // Stats
-        const statsResult = await pool.query(`
-            SELECT COUNT(*) as total,
-                COUNT(CASE WHEN status NOT IN ('finalizado', 'cancelado') THEN 1 END) as em_andamento,
-                COUNT(CASE WHEN status = 'finalizado' THEN 1 END) as finalizados,
-                COUNT(CASE WHEN data_prometida < CURRENT_DATE AND status NOT IN ('finalizado', 'cancelado') THEN 1 END) as atrasados,
-                COUNT(CASE WHEN urgencia IN ('urgente', 'emergencial') AND status NOT IN ('finalizado', 'cancelado') THEN 1 END) as urgentes
-            FROM casos_proteticos WHERE dentista_id = $1
-        `, [parseInt(req.user.id)]);
-
-        const casos = result.rows.map(c => ({
-            id: c.id.toString(),
-            codigo: c.codigo,
-            pacienteId: c.paciente_id?.toString(),
-            pacienteNome: c.paciente_nome,
-            laboratorioId: c.laboratorio_id?.toString(),
-            laboratorioNome: c.laboratorio_nome,
-            laboratorioWhatsapp: c.laboratorio_whatsapp,
-            profissionalId: c.profissional_id?.toString(),
-            profissionalNome: c.profissional_nome,
-            profissionalIcone: c.profissional_icone,
-            tipoTrabalho: c.tipo_trabalho,
-            tipoTrabalhoDetalhe: c.tipo_trabalho_detalhe,
-            tipoPeca: c.tipo_peca,
-            dentes: c.dentes || [],
-            material: c.material,
-            tecnica: c.tecnica,
-            corShade: c.cor_shade,
-            escalaCor: c.escala_cor,
-            urgencia: c.urgencia,
-            dataEnvio: c.data_envio,
-            dataPrometida: c.data_prometida,
-            dataRetornoReal: c.data_retorno_real,
-            status: c.status,
-            observacoesClinics: c.observacoes_clinicas,
-            observacoesTecnicas: c.observacoes_tecnicas,
-            urlArquivos: c.url_arquivos,
-            valorCombinado: c.valor_combinado,
-            valorCusto: c.valor_custo ? parseFloat(c.valor_custo) : null,
-            dataFinalizado: c.data_finalizado,
-            totalArquivos: parseInt(c.total_arquivos) || 0,
-            mensagensNaoLidas: parseInt(c.mensagens_nao_lidas) || 0,
-            criadoEm: c.criado_em,
-            atualizadoEm: c.atualizado_em
-        }));
-
-        res.json({
-            success: true,
-            casos,
-            stats: {
-                total: parseInt(statsResult.rows[0].total) || 0,
-                emAndamento: parseInt(statsResult.rows[0].em_andamento) || 0,
-                finalizados: parseInt(statsResult.rows[0].finalizados) || 0,
-                atrasados: parseInt(statsResult.rows[0].atrasados) || 0,
-                urgentes: parseInt(statsResult.rows[0].urgentes) || 0
-            }
-        });
-    } catch (error) {
-        console.error('Erro ao listar casos:', error);
-        res.status(500).json({ success: false, erro: 'Erro ao listar casos' });
-    }
-});
-
-// Obter caso específico
-app.get('/api/casos-proteticos/:id', authMiddleware, async (req, res) => {
-    try {
-        const { id } = req.params;
-
-        const casoResult = await pool.query(`
-            SELECT cp.*, p.nome as paciente_nome, p.telefone as paciente_telefone,
-                l.nome as laboratorio_nome, l.telefone as laboratorio_telefone, l.whatsapp as laboratorio_whatsapp
-            FROM casos_proteticos cp
-            LEFT JOIN pacientes p ON p.id = cp.paciente_id
-            LEFT JOIN laboratorios l ON l.id = cp.laboratorio_id
-            WHERE cp.id = $1 AND cp.dentista_id = $2
-        `, [parseInt(id), parseInt(req.user.id)]);
-
-        if (casoResult.rows.length === 0) {
-            return res.status(404).json({ success: false, erro: 'Caso não encontrado' });
-        }
-
-        const c = casoResult.rows[0];
-        const arquivosResult = await pool.query('SELECT * FROM casos_arquivos WHERE caso_id = $1 ORDER BY criado_em DESC', [parseInt(id)]);
-        const historicoResult = await pool.query('SELECT * FROM casos_status_historico WHERE caso_id = $1 ORDER BY criado_em DESC', [parseInt(id)]);
-        const mensagensResult = await pool.query('SELECT * FROM casos_mensagens WHERE caso_id = $1 ORDER BY criado_em ASC', [parseInt(id)]);
-
-        res.json({
-            success: true,
-            caso: {
-                id: c.id.toString(),
-                codigo: c.codigo,
-                pacienteId: c.paciente_id?.toString(),
-                pacienteNome: c.paciente_nome,
-                laboratorioId: c.laboratorio_id?.toString(),
-                laboratorioNome: c.laboratorio_nome,
-                laboratorioWhatsapp: c.laboratorio_whatsapp,
-                tipoTrabalho: c.tipo_trabalho,
-                dentes: c.dentes || [],
-                material: c.material,
-                tecnica: c.tecnica,
-                corShade: c.cor_shade,
-                urgencia: c.urgencia,
-                dataEnvio: c.data_envio,
-                dataPrometida: c.data_prometida,
-                status: c.status,
-                observacoesClinics: c.observacoes_clinicas,
-                valorCombinado: c.valor_combinado,
-                criadoEm: c.criado_em
-            },
-            arquivos: arquivosResult.rows.map(a => ({
-                id: a.id.toString(),
-                tipoArquivo: a.tipo_arquivo,
-                nomeArquivo: a.nome_arquivo,
-                urlArquivo: a.url_arquivo,
-                versao: a.versao,
-                criadoEm: a.criado_em
-            })),
-            historico: historicoResult.rows.map(h => ({
-                id: h.id.toString(),
-                statusAnterior: h.status_anterior,
-                statusNovo: h.status_novo,
-                alteradoPor: h.alterado_por,
-                observacao: h.observacao,
-                criadoEm: h.criado_em
-            })),
-            mensagens: mensagensResult.rows.map(m => ({
-                id: m.id.toString(),
-                remetenteTipo: m.remetente_tipo,
-                remetenteNome: m.remetente_nome,
-                mensagem: m.mensagem,
-                lida: m.lida,
-                criadoEm: m.criado_em
-            }))
-        });
-    } catch (error) {
-        console.error('Erro ao obter caso:', error);
-        res.status(500).json({ success: false, erro: 'Erro ao obter caso' });
-    }
-});
-
-// Criar caso
-app.post('/api/casos-proteticos', authMiddleware, async (req, res) => {
-    try {
-        const { pacienteId, laboratorioId, profissionalId, tipoTrabalho, tipoTrabalhoDetalhe, tipoPeca, dentes, material, materialDetalhe, tecnica, corShade, escalaCor, urgencia, dataEnvio, dataPrometida, observacoesClinics, observacoesTecnicas, urlArquivos, valorCombinado } = req.body;
-
-        if (!pacienteId || !tipoTrabalho) {
-            return res.status(400).json({ success: false, erro: 'Paciente e tipo de trabalho são obrigatórios' });
-        }
-
-        const codigo = await gerarCodigoCaso(parseInt(req.user.id));
-
-        const result = await pool.query(`
-            INSERT INTO casos_proteticos (dentista_id, profissional_id, paciente_id, laboratorio_id, codigo, tipo_trabalho, tipo_trabalho_detalhe, tipo_peca, dentes, material, material_detalhe, tecnica, cor_shade, escala_cor, urgencia, data_envio, data_prometida, observacoes_clinicas, observacoes_tecnicas, url_arquivos, valor_combinado, status)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, 'criado') RETURNING *
-        `, [parseInt(req.user.id), profissionalId ? parseInt(profissionalId) : null, parseInt(pacienteId), laboratorioId ? parseInt(laboratorioId) : null, codigo, tipoTrabalho, tipoTrabalhoDetalhe || null, tipoPeca || 'definitiva', dentes || [], material || null, materialDetalhe || null, tecnica || 'convencional', corShade || null, escalaCor || null, urgencia || 'normal', dataEnvio || null, dataPrometida || null, observacoesClinics || null, observacoesTecnicas || null, urlArquivos || null, valorCombinado || null]);
-
-        // Registrar no histórico
-        await pool.query(`INSERT INTO casos_status_historico (caso_id, status_novo, alterado_por, tipo_usuario, observacao) VALUES ($1, 'criado', $2, 'dentista', 'Caso criado')`, [result.rows[0].id, req.user.nome || 'Dentista']);
-
-        res.json({ success: true, caso: { id: result.rows[0].id.toString(), codigo } });
-    } catch (error) {
-        console.error('Erro ao criar caso:', error);
-        res.status(500).json({ success: false, erro: 'Erro ao criar caso' });
-    }
-});
-
-// Buscar casos protéticos de um paciente específico (para Prontuário)
-app.get('/api/pacientes/:pacienteId/casos-proteticos', authMiddleware, async (req, res) => {
-    try {
-        const { pacienteId } = req.params;
-        const { status } = req.query; // opcional: filtrar por status
-        
-        let query = `
-            SELECT cp.*, 
-                l.nome as laboratorio_nome,
-                prof.nome as profissional_nome
-            FROM casos_proteticos cp
-            LEFT JOIN laboratorios l ON l.id = cp.laboratorio_id
-            LEFT JOIN profissionais prof ON prof.id = cp.profissional_id
-            WHERE cp.dentista_id = $1 AND cp.paciente_id = $2
-        `;
-        let params = [parseInt(req.user.id), parseInt(pacienteId)];
-        
-        if (status) {
-            query += ` AND cp.status = $3`;
-            params.push(status);
-        }
-        
-        query += ` ORDER BY cp.criado_em DESC`;
-        
-        const result = await pool.query(query, params);
-        
-        const casos = result.rows.map(c => ({
-            id: c.id.toString(),
-            codigo: c.codigo,
-            profissionalNome: c.profissional_nome,
-            laboratorioNome: c.laboratorio_nome,
-            tipoTrabalho: c.tipo_trabalho,
-            tipoTrabalhoDetalhe: c.tipo_trabalho_detalhe,
-            dentes: c.dentes || [],
-            material: c.material,
-            corShade: c.cor_shade,
-            urgencia: c.urgencia,
-            dataEnvio: c.data_envio,
-            dataPrometida: c.data_prometida,
-            dataRetornoReal: c.data_retorno_real,
-            status: c.status,
-            observacoesClinics: c.observacoes_clinicas,
-            valorCombinado: c.valor_combinado,
-            valorPago: c.valor_pago,
-            criadoEm: c.criado_em,
-            atualizadoEm: c.atualizado_em
-        }));
-        
-        // Estatísticas
-        const stats = {
-            total: casos.length,
-            finalizados: casos.filter(c => c.status === 'finalizado').length,
-            emAndamento: casos.filter(c => c.status !== 'finalizado' && c.status !== 'cancelado').length
-        };
-        
-        res.json({ success: true, casos, stats });
-    } catch (error) {
-        console.error('Erro ao buscar casos do paciente:', error);
-        res.status(500).json({ success: false, erro: 'Erro ao buscar casos' });
-    }
-});
-
-// Atualizar caso
-app.put('/api/casos-proteticos/:id', authMiddleware, async (req, res) => {
-    try {
-        const { id } = req.params;
-        const { laboratorioId, tipoTrabalho, tipoTrabalhoDetalhe, tipoPeca, dentes, material, materialDetalhe, tecnica, corShade, escalaCor, urgencia, dataEnvio, dataPrometida, dataRetornoReal, observacoesClinics, observacoesTecnicas, urlArquivos, valorCombinado, valorPago } = req.body;
-
-        const result = await pool.query(`
-            UPDATE casos_proteticos SET laboratorio_id = $1, tipo_trabalho = COALESCE($2, tipo_trabalho), tipo_trabalho_detalhe = $3, tipo_peca = COALESCE($4, tipo_peca), dentes = $5, material = $6, material_detalhe = $7, tecnica = $8, cor_shade = $9, escala_cor = $10, urgencia = $11, data_envio = $12, data_prometida = $13, data_retorno_real = $14, observacoes_clinicas = $15, observacoes_tecnicas = $16, url_arquivos = $17, valor_combinado = $18, valor_pago = $19, atualizado_em = CURRENT_TIMESTAMP
-            WHERE id = $20 AND dentista_id = $21 RETURNING *
-        `, [laboratorioId ? parseInt(laboratorioId) : null, tipoTrabalho, tipoTrabalhoDetalhe || null, tipoPeca || null, dentes || [], material || null, materialDetalhe || null, tecnica || 'convencional', corShade || null, escalaCor || null, urgencia || 'normal', dataEnvio || null, dataPrometida || null, dataRetornoReal || null, observacoesClinics || null, observacoesTecnicas || null, urlArquivos || null, valorCombinado || null, valorPago || null, parseInt(id), parseInt(req.user.id)]);
-
-        if (result.rows.length === 0) {
-            return res.status(404).json({ success: false, erro: 'Caso não encontrado' });
-        }
-
-        res.json({ success: true, message: 'Caso atualizado!' });
-    } catch (error) {
-        console.error('Erro ao atualizar caso:', error);
-        res.status(500).json({ success: false, erro: 'Erro ao atualizar caso' });
-    }
-});
-
-// Atualizar status do caso
-app.put('/api/casos-proteticos/:id/status', authMiddleware, async (req, res) => {
-    try {
-        const { id } = req.params;
-        const { status, observacao, valorCusto } = req.body;
-
-        const statusValidos = ['criado', 'aguardando_envio', 'enviado_lab', 'em_design', 'em_producao', 'em_acabamento', 'em_transporte', 'recebido_clinica', 'prova_clinica', 'ajuste_solicitado', 'retrabalho', 'finalizado', 'cancelado'];
-
-        if (!statusValidos.includes(status)) {
-            return res.status(400).json({ success: false, erro: 'Status inválido' });
-        }
-
-        const casoAtual = await pool.query('SELECT status FROM casos_proteticos WHERE id = $1 AND dentista_id = $2', [parseInt(id), parseInt(req.user.id)]);
-        if (casoAtual.rows.length === 0) {
-            return res.status(404).json({ success: false, erro: 'Caso não encontrado' });
-        }
-
-        const statusAnterior = casoAtual.rows[0].status;
-
-        let updateQuery = 'UPDATE casos_proteticos SET status = $1, atualizado_em = CURRENT_TIMESTAMP';
-        const params = [status];
-        let paramCount = 1;
-
-        // Quando finaliza, gravar data de finalização
-        if (status === 'finalizado') {
-            updateQuery += ', data_retorno_real = COALESCE(data_retorno_real, CURRENT_DATE)';
-            updateQuery += ', data_finalizado = CURRENT_TIMESTAMP';
-        }
-
-        // Atualizar custo se informado
-        if (valorCusto !== undefined) {
-            paramCount++;
-            updateQuery += `, valor_custo = $${paramCount}`;
-            params.push(parseFloat(valorCusto));
-        }
-
-        paramCount++;
-        updateQuery += ` WHERE id = $${paramCount}`;
-        params.push(parseInt(id));
-        
-        paramCount++;
-        updateQuery += ` AND dentista_id = $${paramCount}`;
-        params.push(parseInt(req.user.id));
-
-        await pool.query(updateQuery, params);
-        await pool.query(`INSERT INTO casos_status_historico (caso_id, status_anterior, status_novo, alterado_por, tipo_usuario, observacao) VALUES ($1, $2, $3, $4, 'dentista', $5)`, [parseInt(id), statusAnterior, status, req.user.nome || 'Dentista', observacao || null]);
-
-        res.json({ success: true, message: 'Status atualizado!' });
-    } catch (error) {
-        console.error('Erro ao atualizar status:', error);
-        res.status(500).json({ success: false, erro: 'Erro ao atualizar status' });
-    }
-});
-
-// Atualizar custo do caso
-app.put('/api/casos-proteticos/:id/custo', authMiddleware, async (req, res) => {
-    try {
-        const { id } = req.params;
-        const { valorCusto } = req.body;
-
-        if (valorCusto === undefined) {
-            return res.status(400).json({ success: false, erro: 'Valor do custo é obrigatório' });
-        }
-
-        const result = await pool.query(
-            `UPDATE casos_proteticos SET valor_custo = $1, atualizado_em = CURRENT_TIMESTAMP 
-             WHERE id = $2 AND dentista_id = $3 RETURNING *`,
-            [parseFloat(valorCusto), parseInt(id), parseInt(req.user.id)]
-        );
-
-        if (result.rows.length === 0) {
-            return res.status(404).json({ success: false, erro: 'Caso não encontrado' });
-        }
-
-        res.json({ success: true, message: 'Custo atualizado!', valorCusto: parseFloat(valorCusto) });
-    } catch (error) {
-        console.error('Erro ao atualizar custo:', error);
-        res.status(500).json({ success: false, erro: 'Erro ao atualizar custo' });
-    }
-});
-
-// Cancelar caso
-app.delete('/api/casos-proteticos/:id', authMiddleware, async (req, res) => {
-    try {
-        const { id } = req.params;
-        await pool.query(`UPDATE casos_proteticos SET status = 'cancelado', atualizado_em = CURRENT_TIMESTAMP WHERE id = $1 AND dentista_id = $2`, [parseInt(id), parseInt(req.user.id)]);
-        await pool.query(`INSERT INTO casos_status_historico (caso_id, status_novo, alterado_por, tipo_usuario, observacao) VALUES ($1, 'cancelado', $2, 'dentista', 'Caso cancelado')`, [parseInt(id), req.user.nome || 'Dentista']);
-        res.json({ success: true, message: 'Caso cancelado!' });
-    } catch (error) {
-        console.error('Erro ao cancelar caso:', error);
-        res.status(500).json({ success: false, erro: 'Erro ao cancelar caso' });
-    }
-});
-
-// Enviar mensagem no caso
-app.post('/api/casos-proteticos/:id/mensagens', authMiddleware, async (req, res) => {
-    try {
-        const { id } = req.params;
-        const { mensagem } = req.body;
-
-        if (!mensagem) {
-            return res.status(400).json({ success: false, erro: 'Mensagem é obrigatória' });
-        }
-
-        const casoCheck = await pool.query('SELECT id FROM casos_proteticos WHERE id = $1 AND dentista_id = $2', [parseInt(id), parseInt(req.user.id)]);
-        if (casoCheck.rows.length === 0) {
-            return res.status(404).json({ success: false, erro: 'Caso não encontrado' });
-        }
-
-        const result = await pool.query(`INSERT INTO casos_mensagens (caso_id, remetente_tipo, remetente_nome, mensagem) VALUES ($1, 'dentista', $2, $3) RETURNING *`, [parseInt(id), req.user.nome || 'Dentista', mensagem]);
-
-        res.json({
-            success: true,
-            mensagem: {
-                id: result.rows[0].id.toString(),
-                remetenteTipo: result.rows[0].remetente_tipo,
-                remetenteNome: result.rows[0].remetente_nome,
-                mensagem: result.rows[0].mensagem,
-                criadoEm: result.rows[0].criado_em
-            }
-        });
-    } catch (error) {
-        console.error('Erro ao enviar mensagem:', error);
-        res.status(500).json({ success: false, erro: 'Erro ao enviar mensagem' });
     }
 });
 

@@ -2533,15 +2533,15 @@ app.get('/api/financas', authMiddleware, async (req, res) => {
         const params = [parseInt(req.user.id)];
         let paramCount = 1;
 
-        // Filtro por data de finalização
+        // Filtro por data de finalização (convertendo para timezone local)
         if (dataInicio) {
             paramCount++;
-            query += ` AND cp.data_finalizado >= $${paramCount}`;
+            query += ` AND (cp.data_finalizado AT TIME ZONE 'America/Sao_Paulo')::date >= $${paramCount}::date`;
             params.push(dataInicio);
         }
         if (dataFim) {
             paramCount++;
-            query += ` AND cp.data_finalizado <= $${paramCount}::date + interval '1 day'`;
+            query += ` AND (cp.data_finalizado AT TIME ZONE 'America/Sao_Paulo')::date <= $${paramCount}::date`;
             params.push(dataFim);
         }
 

@@ -2812,7 +2812,7 @@ app.get('/api/casos-proteticos/:id', authMiddleware, async (req, res) => {
 // Criar caso
 app.post('/api/casos-proteticos', authMiddleware, async (req, res) => {
     try {
-        const { pacienteId, laboratorioId, profissionalId, tipoTrabalho, tipoTrabalhoDetalhe, tipoPeca, dentes, material, materialDetalhe, tecnica, corShade, escalaCor, urgencia, dataEnvio, dataPrometida, observacoesClinics, observacoesTecnicas, urlArquivos, valorCombinado } = req.body;
+        const { pacienteId, laboratorioId, profissionalId, tipoTrabalho, tipoTrabalhoDetalhe, tipoPeca, dentes, material, materialDetalhe, tecnica, corShade, escalaCor, urgencia, dataEnvio, dataPrometida, observacoesClinics, observacoesTecnicas, urlArquivos, valorCombinado, valorCusto } = req.body;
 
         if (!pacienteId || !tipoTrabalho) {
             return res.status(400).json({ success: false, erro: 'Paciente e tipo de trabalho são obrigatórios' });
@@ -2821,9 +2821,9 @@ app.post('/api/casos-proteticos', authMiddleware, async (req, res) => {
         const codigo = await gerarCodigoCaso(parseInt(req.user.id));
 
         const result = await pool.query(`
-            INSERT INTO casos_proteticos (dentista_id, profissional_id, paciente_id, laboratorio_id, codigo, tipo_trabalho, tipo_trabalho_detalhe, tipo_peca, dentes, material, material_detalhe, tecnica, cor_shade, escala_cor, urgencia, data_envio, data_prometida, observacoes_clinicas, observacoes_tecnicas, url_arquivos, valor_combinado, status)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, 'criado') RETURNING *
-        `, [parseInt(req.user.id), profissionalId ? parseInt(profissionalId) : null, parseInt(pacienteId), laboratorioId ? parseInt(laboratorioId) : null, codigo, tipoTrabalho, tipoTrabalhoDetalhe || null, tipoPeca || 'definitiva', dentes || [], material || null, materialDetalhe || null, tecnica || 'convencional', corShade || null, escalaCor || null, urgencia || 'normal', dataEnvio || null, dataPrometida || null, observacoesClinics || null, observacoesTecnicas || null, urlArquivos || null, valorCombinado || null]);
+            INSERT INTO casos_proteticos (dentista_id, profissional_id, paciente_id, laboratorio_id, codigo, tipo_trabalho, tipo_trabalho_detalhe, tipo_peca, dentes, material, material_detalhe, tecnica, cor_shade, escala_cor, urgencia, data_envio, data_prometida, observacoes_clinicas, observacoes_tecnicas, url_arquivos, valor_combinado, valor_custo, status)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, 'criado') RETURNING *
+        `, [parseInt(req.user.id), profissionalId ? parseInt(profissionalId) : null, parseInt(pacienteId), laboratorioId ? parseInt(laboratorioId) : null, codigo, tipoTrabalho, tipoTrabalhoDetalhe || null, tipoPeca || 'definitiva', dentes || [], material || null, materialDetalhe || null, tecnica || 'convencional', corShade || null, escalaCor || null, urgencia || 'normal', dataEnvio || null, dataPrometida || null, observacoesClinics || null, observacoesTecnicas || null, urlArquivos || null, valorCombinado || null, valorCusto || null]);
 
         // Registrar no histórico
         await pool.query(`INSERT INTO casos_status_historico (caso_id, status_novo, alterado_por, tipo_usuario, observacao) VALUES ($1, 'criado', $2, 'dentista', 'Caso criado')`, [result.rows[0].id, req.user.nome || 'Dentista']);

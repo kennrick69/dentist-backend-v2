@@ -1972,7 +1972,7 @@ app.get('/api/agendamentos/pendentes', authMiddleware, async (req, res) => {
         // Buscar agendamentos pendentes (status = 'agendado') com dados do paciente e profissional
         const result = await pool.query(
             `SELECT a.*, 
-                    p.celular as paciente_telefone,
+                    COALESCE(p.celular, p.telefone) as paciente_telefone,
                     prof.nome as profissional_nome
              FROM agendamentos a
              LEFT JOIN pacientes p ON a.paciente_id = p.id
@@ -2110,7 +2110,7 @@ app.get('/api/agendamentos/:id', authMiddleware, async (req, res) => {
         }
         
         const result = await pool.query(
-            `SELECT a.*, p.celular as paciente_telefone_db
+            `SELECT a.*, COALESCE(p.celular, p.telefone) as paciente_telefone_db
              FROM agendamentos a
              LEFT JOIN pacientes p ON a.paciente_id = p.id
              WHERE a.id = $1 AND a.dentista_id = $2`,
@@ -3012,7 +3012,7 @@ app.get('/api/casos-proteticos/:id', authMiddleware, async (req, res) => {
         const { id } = req.params;
 
         const casoResult = await pool.query(`
-            SELECT cp.*, p.nome as paciente_nome, p.telefone as paciente_telefone,
+            SELECT cp.*, p.nome as paciente_nome, COALESCE(p.celular, p.telefone) as paciente_telefone,
                 l.nome as laboratorio_nome, l.telefone as laboratorio_telefone, l.whatsapp as laboratorio_whatsapp
             FROM casos_proteticos cp
             LEFT JOIN pacientes p ON p.id = cp.paciente_id

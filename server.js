@@ -589,16 +589,21 @@ app.post('/api/auth/register', async (req, res) => {
             return res.status(400).json({ success: false, erro: 'Senha deve ter no mínimo 6 caracteres' });
         }
 
-        const existing = await pool.query('SELECT id, email_confirmado FROM dentistas WHERE email = $1', [email.toLowerCase()]);
+        // Verificar se email já existe (SELECT * para pegar todas as colunas disponíveis)
+        const existing = await pool.query('SELECT * FROM dentistas WHERE email = $1', [email.toLowerCase()]);
         if (existing.rows.length > 0) {
-            // Se já existe mas não confirmou, permite reenviar
-            if (!existing.rows[0].email_confirmado) {
+            const existingUser = existing.rows[0];
+            // Verificar se email_confirmado existe e é false (se a coluna não existir, considera como null)
+            const emailConfirmado = existingUser.email_confirmado;
+            
+            // Se já existe mas não confirmou (ou coluna não existe ainda), permite reenviar
+            if (emailConfirmado === false) {
                 const token = gerarToken();
                 const expira = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 horas
                 
                 await pool.query(
                     'UPDATE dentistas SET token_confirmacao = $1, token_expira = $2 WHERE id = $3',
-                    [token, expira, existing.rows[0].id]
+                    [token, expira, existingUser.id]
                 );
                 
                 // Enviar email
@@ -642,9 +647,11 @@ app.post('/api/auth/register', async (req, res) => {
         const expira = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 horas
 
         const senhaHash = await bcrypt.hash(password, 10);
+        
+        // Inserir usando nomes das colunas existentes no banco (inglês)
         const result = await pool.query(
-            `INSERT INTO dentistas (nome, cro, email, senha, clinica, especialidade, email_confirmado, token_confirmacao, token_expira)
-             VALUES ($1, $2, $3, $4, $5, $6, false, $7, $8) RETURNING id, nome, cro, email, clinica, especialidade`,
+            `INSERT INTO dentistas (name, cro, email, password, clinic, specialty, email_confirmado, token_confirmacao, token_expira)
+             VALUES ($1, $2, $3, $4, $5, $6, false, $7, $8) RETURNING id, name, cro, email, clinic, specialty`,
             [name, cro, email.toLowerCase(), senhaHash, clinic || '', specialty || '', token, expira]
         );
 
@@ -684,8 +691,8 @@ app.post('/api/auth/register', async (req, res) => {
             emailEnviado: emailEnviado
         });
     } catch (error) {
-        console.error('Erro registro:', error);
-        res.status(500).json({ success: false, erro: 'Erro interno' });
+        console.error('Erro registro:', error.message, error.stack);
+        res.status(500).json({ success: false, erro: 'Erro interno: ' + error.message });
     }
 });
 
@@ -807,7 +814,8 @@ app.post('/api/auth/login', async (req, res) => {
 
         const dentista = result.rows[0];
         
-        // Verificar se email foi confirmado
+        // Verificar se email foi confirmado (apenas se a coluna existir e for false)
+        // Se email_confirmado for null/undefined, permite login (para usuários antigos)
         if (dentista.email_confirmado === false) {
             return res.status(403).json({ 
                 success: false, 

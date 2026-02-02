@@ -706,7 +706,7 @@ app.get('/api/auth/confirmar-email', async (req, res) => {
         }
         
         const result = await pool.query(
-            'SELECT id, nome, email, token_expira FROM dentistas WHERE token_confirmacao = $1',
+            'SELECT id, name, email, token_expira FROM dentistas WHERE token_confirmacao = $1',
             [token]
         );
         
@@ -730,7 +730,7 @@ app.get('/api/auth/confirmar-email', async (req, res) => {
         res.json({ 
             success: true, 
             message: 'Email confirmado com sucesso! Você já pode fazer login.',
-            nome: dentista.nome
+            nome: dentista.name
         });
     } catch (error) {
         console.error('Erro confirmar email:', error);
@@ -748,7 +748,7 @@ app.post('/api/auth/reenviar-confirmacao', async (req, res) => {
         }
         
         const result = await pool.query(
-            'SELECT id, nome, email_confirmado FROM dentistas WHERE email = $1',
+            'SELECT id, name, email_confirmado FROM dentistas WHERE email = $1',
             [email.toLowerCase()]
         );
         
@@ -775,7 +775,7 @@ app.post('/api/auth/reenviar-confirmacao', async (req, res) => {
                     <h1 style="color: #1FA2FF;">🦷 Dental Ultra</h1>
                 </div>
                 <h2 style="color: #333;">Confirme seu email</h2>
-                <p>Olá <strong>${result.rows[0].nome}</strong>,</p>
+                <p>Olá <strong>${result.rows[0].name}</strong>,</p>
                 <p>Clique no botão abaixo para confirmar seu email:</p>
                 <div style="text-align: center; margin: 30px 0;">
                     <a href="${linkConfirmacao}" style="background: linear-gradient(135deg, #1FA2FF, #12D8FA); color: white; padding: 15px 40px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block;">

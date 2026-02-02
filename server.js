@@ -455,6 +455,16 @@ async function initDatabase() {
             try { await pool.query(mig); } catch (e) {}
         }
 
+        // ============ MIGRAÇÕES - CONFIRMAÇÃO DE EMAIL ============
+        const migracoesEmail = [
+            "ALTER TABLE dentistas ADD COLUMN IF NOT EXISTS email_confirmado BOOLEAN DEFAULT false",
+            "ALTER TABLE dentistas ADD COLUMN IF NOT EXISTS token_confirmacao VARCHAR(64)",
+            "ALTER TABLE dentistas ADD COLUMN IF NOT EXISTS token_expira TIMESTAMP"
+        ];
+        for (const mig of migracoesEmail) {
+            try { await pool.query(mig); } catch (e) {}
+        }
+
         console.log('Banco de dados inicializado!');
     } catch (error) {
         console.error('Erro ao inicializar banco:', error.message);
@@ -530,6 +540,43 @@ function authMiddleware(req, res, next) {
 // ROTAS DE AUTENTICAÇÃO
 // ==============================================================================
 
+// Configuração do envio de email via PHP (Hostinger)
+const EMAIL_PHP_URL = process.env.EMAIL_PHP_URL || 'https://dentalultra.com.br/api/enviar-email.php';
+const EMAIL_CHAVE_SECRETA = process.env.EMAIL_CHAVE_SECRETA || 'DENTAL_ULTRA_EMAIL_2024_SECRETKEY';
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://dentalultra.com.br';
+
+// Função para gerar token aleatório
+function gerarToken(tamanho = 32) {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    let token = '';
+    for (let i = 0; i < tamanho; i++) {
+        token += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return token;
+}
+
+// Função para enviar email via PHP
+async function enviarEmail(para, assunto, mensagemHtml) {
+    try {
+        const response = await fetch(EMAIL_PHP_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                chave: EMAIL_CHAVE_SECRETA,
+                para: para,
+                assunto: assunto,
+                mensagem: mensagemHtml,
+                tipo: 'html'
+            })
+        });
+        const data = await response.json();
+        return data.success;
+    } catch (error) {
+        console.error('Erro ao enviar email:', error);
+        return false;
+    }
+}
+
 app.post('/api/auth/register', async (req, res) => {
     try {
         const { name, cro, email, password, clinic, specialty } = req.body;
@@ -542,25 +589,206 @@ app.post('/api/auth/register', async (req, res) => {
             return res.status(400).json({ success: false, erro: 'Senha deve ter no mínimo 6 caracteres' });
         }
 
-        const existing = await pool.query('SELECT id FROM dentistas WHERE email = $1', [email.toLowerCase()]);
+        const existing = await pool.query('SELECT id, email_confirmado FROM dentistas WHERE email = $1', [email.toLowerCase()]);
         if (existing.rows.length > 0) {
+            // Se já existe mas não confirmou, permite reenviar
+            if (!existing.rows[0].email_confirmado) {
+                const token = gerarToken();
+                const expira = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 horas
+                
+                await pool.query(
+                    'UPDATE dentistas SET token_confirmacao = $1, token_expira = $2 WHERE id = $3',
+                    [token, expira, existing.rows[0].id]
+                );
+                
+                // Enviar email
+                const linkConfirmacao = `${FRONTEND_URL}/area-dentistas/confirmar-email.html?token=${token}`;
+                const emailHtml = `
+                    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+                        <div style="text-align: center; margin-bottom: 30px;">
+                            <h1 style="color: #1FA2FF;">🦷 Dental Ultra</h1>
+                        </div>
+                        <h2 style="color: #333;">Confirme seu email</h2>
+                        <p>Olá <strong>${name}</strong>,</p>
+                        <p>Você já iniciou um cadastro anteriormente. Clique no botão abaixo para confirmar seu email:</p>
+                        <div style="text-align: center; margin: 30px 0;">
+                            <a href="${linkConfirmacao}" style="background: linear-gradient(135deg, #1FA2FF, #12D8FA); color: white; padding: 15px 40px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block;">
+                                ✅ Confirmar Email
+                            </a>
+                        </div>
+                        <p style="color: #666; font-size: 14px;">Este link expira em 24 horas.</p>
+                        <p style="color: #666; font-size: 14px;">Se você não solicitou este cadastro, ignore este email.</p>
+                        <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+                        <p style="color: #999; font-size: 12px; text-align: center;">
+                            Dental Ultra - Sistema de Gestão Odontológica<br>
+                            suporte@dentalultra.com.br
+                        </p>
+                    </div>
+                `;
+                
+                await enviarEmail(email.toLowerCase(), '🦷 Confirme seu email - Dental Ultra', emailHtml);
+                
+                return res.status(200).json({
+                    success: true,
+                    message: 'Email de confirmação reenviado! Verifique sua caixa de entrada.',
+                    aguardandoConfirmacao: true
+                });
+            }
             return res.status(400).json({ success: false, erro: 'Email já cadastrado' });
         }
 
+        // Gerar token e data de expiração
+        const token = gerarToken();
+        const expira = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 horas
+
         const senhaHash = await bcrypt.hash(password, 10);
         const result = await pool.query(
-            `INSERT INTO dentistas (name, cro, email, password, clinic, specialty)
-             VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, name, cro, email, clinic, specialty`,
-            [name, cro, email.toLowerCase(), senhaHash, clinic || '', specialty || '']
+            `INSERT INTO dentistas (nome, cro, email, senha, clinica, especialidade, email_confirmado, token_confirmacao, token_expira)
+             VALUES ($1, $2, $3, $4, $5, $6, false, $7, $8) RETURNING id, nome, cro, email, clinica, especialidade`,
+            [name, cro, email.toLowerCase(), senhaHash, clinic || '', specialty || '', token, expira]
         );
+
+        // Enviar email de confirmação
+        const linkConfirmacao = `${FRONTEND_URL}/area-dentistas/confirmar-email.html?token=${token}`;
+        const emailHtml = `
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+                <div style="text-align: center; margin-bottom: 30px;">
+                    <h1 style="color: #1FA2FF;">🦷 Dental Ultra</h1>
+                </div>
+                <h2 style="color: #333;">Bem-vindo(a) ao Dental Ultra!</h2>
+                <p>Olá <strong>${name}</strong>,</p>
+                <p>Obrigado por se cadastrar! Para ativar sua conta, clique no botão abaixo:</p>
+                <div style="text-align: center; margin: 30px 0;">
+                    <a href="${linkConfirmacao}" style="background: linear-gradient(135deg, #1FA2FF, #12D8FA); color: white; padding: 15px 40px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block;">
+                        ✅ Confirmar Email
+                    </a>
+                </div>
+                <p style="color: #666; font-size: 14px;">Este link expira em 24 horas.</p>
+                <p style="color: #666; font-size: 14px;">Se você não solicitou este cadastro, ignore este email.</p>
+                <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+                <p style="color: #999; font-size: 12px; text-align: center;">
+                    Dental Ultra - Sistema de Gestão Odontológica<br>
+                    suporte@dentalultra.com.br
+                </p>
+            </div>
+        `;
+        
+        const emailEnviado = await enviarEmail(email.toLowerCase(), '🦷 Confirme seu email - Dental Ultra', emailHtml);
 
         res.status(201).json({
             success: true,
-            message: 'Cadastro realizado com sucesso!',
-            dentista: { id: result.rows[0].id.toString(), nome: result.rows[0].name, email: result.rows[0].email }
+            message: emailEnviado 
+                ? 'Cadastro realizado! Verifique seu email para confirmar a conta.' 
+                : 'Cadastro realizado! Por favor, entre em contato com o suporte para ativar sua conta.',
+            aguardandoConfirmacao: true,
+            emailEnviado: emailEnviado
         });
     } catch (error) {
         console.error('Erro registro:', error);
+        res.status(500).json({ success: false, erro: 'Erro interno' });
+    }
+});
+
+// Rota para confirmar email
+app.get('/api/auth/confirmar-email', async (req, res) => {
+    try {
+        const { token } = req.query;
+        
+        if (!token) {
+            return res.status(400).json({ success: false, erro: 'Token não fornecido' });
+        }
+        
+        const result = await pool.query(
+            'SELECT id, nome, email, token_expira FROM dentistas WHERE token_confirmacao = $1',
+            [token]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(400).json({ success: false, erro: 'Token inválido ou já utilizado' });
+        }
+        
+        const dentista = result.rows[0];
+        
+        // Verificar se expirou
+        if (new Date() > new Date(dentista.token_expira)) {
+            return res.status(400).json({ success: false, erro: 'Token expirado. Faça o cadastro novamente.' });
+        }
+        
+        // Confirmar email
+        await pool.query(
+            'UPDATE dentistas SET email_confirmado = true, token_confirmacao = NULL, token_expira = NULL WHERE id = $1',
+            [dentista.id]
+        );
+        
+        res.json({ 
+            success: true, 
+            message: 'Email confirmado com sucesso! Você já pode fazer login.',
+            nome: dentista.nome
+        });
+    } catch (error) {
+        console.error('Erro confirmar email:', error);
+        res.status(500).json({ success: false, erro: 'Erro interno' });
+    }
+});
+
+// Rota para reenviar email de confirmação
+app.post('/api/auth/reenviar-confirmacao', async (req, res) => {
+    try {
+        const { email } = req.body;
+        
+        if (!email) {
+            return res.status(400).json({ success: false, erro: 'Email obrigatório' });
+        }
+        
+        const result = await pool.query(
+            'SELECT id, nome, email_confirmado FROM dentistas WHERE email = $1',
+            [email.toLowerCase()]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(400).json({ success: false, erro: 'Email não encontrado' });
+        }
+        
+        if (result.rows[0].email_confirmado) {
+            return res.status(400).json({ success: false, erro: 'Email já confirmado. Faça login.' });
+        }
+        
+        const token = gerarToken();
+        const expira = new Date(Date.now() + 24 * 60 * 60 * 1000);
+        
+        await pool.query(
+            'UPDATE dentistas SET token_confirmacao = $1, token_expira = $2 WHERE id = $3',
+            [token, expira, result.rows[0].id]
+        );
+        
+        const linkConfirmacao = `${FRONTEND_URL}/area-dentistas/confirmar-email.html?token=${token}`;
+        const emailHtml = `
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+                <div style="text-align: center; margin-bottom: 30px;">
+                    <h1 style="color: #1FA2FF;">🦷 Dental Ultra</h1>
+                </div>
+                <h2 style="color: #333;">Confirme seu email</h2>
+                <p>Olá <strong>${result.rows[0].nome}</strong>,</p>
+                <p>Clique no botão abaixo para confirmar seu email:</p>
+                <div style="text-align: center; margin: 30px 0;">
+                    <a href="${linkConfirmacao}" style="background: linear-gradient(135deg, #1FA2FF, #12D8FA); color: white; padding: 15px 40px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block;">
+                        ✅ Confirmar Email
+                    </a>
+                </div>
+                <p style="color: #666; font-size: 14px;">Este link expira em 24 horas.</p>
+                <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+                <p style="color: #999; font-size: 12px; text-align: center;">
+                    Dental Ultra - Sistema de Gestão Odontológica<br>
+                    suporte@dentalultra.com.br
+                </p>
+            </div>
+        `;
+        
+        await enviarEmail(email.toLowerCase(), '🦷 Confirme seu email - Dental Ultra', emailHtml);
+        
+        res.json({ success: true, message: 'Email de confirmação reenviado!' });
+    } catch (error) {
+        console.error('Erro reenviar confirmação:', error);
         res.status(500).json({ success: false, erro: 'Erro interno' });
     }
 });
@@ -579,21 +807,36 @@ app.post('/api/auth/login', async (req, res) => {
 
         const dentista = result.rows[0];
         
-        if (!dentista.password) {
+        // Verificar se email foi confirmado
+        if (dentista.email_confirmado === false) {
+            return res.status(403).json({ 
+                success: false, 
+                erro: 'Email não confirmado. Verifique sua caixa de entrada.',
+                emailNaoConfirmado: true,
+                email: dentista.email
+            });
+        }
+        
+        // Verificar senha (suporta ambos os nomes de coluna)
+        const senhaHash = dentista.senha || dentista.password;
+        if (!senhaHash) {
             return res.status(401).json({ success: false, erro: 'Email ou senha incorretos' });
         }
-        const senhaValida = await bcrypt.compare(password, dentista.password);
+        const senhaValida = await bcrypt.compare(password, senhaHash);
         if (!senhaValida) {
             return res.status(401).json({ success: false, erro: 'Email ou senha incorretos' });
         }
 
         // Verificar se conta está desativada
-        if (dentista.subscription_active === false) {
+        if (dentista.subscription_active === false || dentista.ativo === false) {
             return res.status(403).json({ success: false, erro: 'Conta desativada' });
         }
 
+        // Pegar nome (suporta ambos os nomes de coluna)
+        const nome = dentista.nome || dentista.name;
+
         const token = jwt.sign(
-            { id: dentista.id.toString(), email: dentista.email, nome: dentista.name },
+            { id: dentista.id.toString(), email: dentista.email, nome: nome },
             JWT_SECRET,
             { expiresIn: '30d' }
         );
@@ -604,12 +847,12 @@ app.post('/api/auth/login', async (req, res) => {
             token,
             dentista: {
                 id: dentista.id.toString(),
-                nome: dentista.name,
+                nome: nome,
                 cro: dentista.cro,
                 email: dentista.email,
-                clinica: dentista.clinic,
-                especialidade: dentista.specialty,
-                plano: dentista.subscription_plan || 'premium'
+                clinica: dentista.clinica || dentista.clinic,
+                especialidade: dentista.especialidade || dentista.specialty,
+                plano: dentista.subscription_plan || dentista.plano || 'premium'
             }
         });
     } catch (error) {

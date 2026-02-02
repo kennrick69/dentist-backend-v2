@@ -2883,12 +2883,33 @@ app.get('/api/financas', authMiddleware, async (req, res) => {
 // Função para gerar código do caso
 async function gerarCodigoCaso(dentistaId) {
     const ano = new Date().getFullYear();
-    const result = await pool.query(
-        `SELECT COUNT(*) + 1 as seq FROM casos_proteticos WHERE dentista_id = $1 AND codigo LIKE $2`,
-        [dentistaId, `CP-${ano}-%`]
-    );
-    const seq = result.rows[0].seq;
-    return `CP-${ano}-${String(seq).padStart(4, '0')}`;
+    
+    // Gerar código aleatório (6 caracteres alfanuméricos)
+    function gerarAleatorio() {
+        const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // Sem I, O, 0, 1 para evitar confusão
+        let codigo = '';
+        for (let i = 0; i < 6; i++) {
+            codigo += chars.charAt(Math.floor(Math.random() * chars.length));
+        }
+        return `CP-${ano}-${codigo}`;
+    }
+    
+    // Tentar gerar código único
+    let tentativas = 0;
+    while (tentativas < 10) {
+        const codigo = gerarAleatorio();
+        const existe = await pool.query(
+            'SELECT id FROM casos_proteticos WHERE codigo = $1',
+            [codigo]
+        );
+        if (existe.rows.length === 0) {
+            return codigo;
+        }
+        tentativas++;
+    }
+    
+    // Fallback extremo: usar timestamp
+    return `CP-${ano}-${Date.now()}`;
 }
 
 // Listar casos

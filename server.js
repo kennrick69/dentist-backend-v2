@@ -1911,34 +1911,38 @@ app.post('/api/agendamentos/confirmar', async (req, res) => {
 app.get('/api/agendamentos', authMiddleware, async (req, res) => {
     try {
         const { data, inicio, fim, profissional_id } = req.query;
-        let query = 'SELECT * FROM agendamentos WHERE dentista_id = $1';
+        let query = `SELECT a.*, COALESCE(p.celular, p.telefone) as paciente_telefone 
+                     FROM agendamentos a 
+                     LEFT JOIN pacientes p ON a.paciente_id = p.id 
+                     WHERE a.dentista_id = $1`;
         const params = [parseInt(req.user.id)];
         let paramIndex = 2;
 
         // Filtrar por profissional específico (coluna da agenda)
         if (profissional_id) {
-            query += ` AND profissional_id = $${paramIndex}`;
+            query += ` AND a.profissional_id = $${paramIndex}`;
             params.push(parseInt(profissional_id));
             paramIndex++;
         }
 
         if (data) {
-            query += ` AND data = $${paramIndex}`;
+            query += ` AND a.data = $${paramIndex}`;
             params.push(data);
             paramIndex++;
         } else if (inicio && fim) {
-            query += ` AND data >= $${paramIndex} AND data <= $${paramIndex + 1}`;
+            query += ` AND a.data >= $${paramIndex} AND a.data <= $${paramIndex + 1}`;
             params.push(inicio, fim);
             paramIndex += 2;
         }
 
-        query += ' ORDER BY data ASC, horario ASC';
+        query += ' ORDER BY a.data ASC, a.horario ASC';
         const result = await pool.query(query, params);
 
         const agendamentos = result.rows.map(a => ({
             id: a.id.toString(),
             pacienteId: a.paciente_id ? a.paciente_id.toString() : null,
             paciente_nome: a.paciente_nome,
+            paciente_telefone: a.paciente_telefone || null,
             data: a.data,
             hora: a.horario,
             duracao: a.duracao,

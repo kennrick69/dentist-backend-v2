@@ -465,6 +465,56 @@ async function initDatabase() {
             try { await pool.query(mig); } catch (e) {}
         }
 
+        // ============ MÓDULO NFS-e - CONFIGURAÇÕES DE PREFEITURAS ============
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS config_prefeituras (
+                id SERIAL PRIMARY KEY,
+                dentista_id INTEGER REFERENCES dentistas(id) ON DELETE CASCADE,
+                -- Identificação
+                cidade VARCHAR(100) NOT NULL,
+                uf CHAR(2) NOT NULL,
+                codigo_tom VARCHAR(20),
+                sistema VARCHAR(50) DEFAULT 'ipm',
+                -- Conexão
+                url_webservice TEXT NOT NULL,
+                cpf_cnpj_prestador VARCHAR(20),
+                senha_webservice VARCHAR(255),
+                serie_nfse VARCHAR(10) DEFAULT '1',
+                ambiente VARCHAR(20) DEFAULT 'producao',
+                exige_certificado BOOLEAN DEFAULT false,
+                -- Tributação ISS
+                aliquota_iss DECIMAL(5,2) DEFAULT 3.00,
+                codigo_servico VARCHAR(20),
+                item_lista_servico VARCHAR(20) DEFAULT '4.11',
+                codigo_nbs VARCHAR(30),
+                situacao_tributaria VARCHAR(10) DEFAULT '1',
+                -- Reforma Tributária 2026 (IBS/CBS)
+                cst_ibs_cbs VARCHAR(10),
+                class_trib VARCHAR(20),
+                fin_nfse VARCHAR(10),
+                ind_final VARCHAR(10),
+                c_ind_op VARCHAR(20),
+                aliquota_ibs_uf DECIMAL(5,2),
+                aliquota_ibs_mun DECIMAL(5,2),
+                aliquota_cbs DECIMAL(5,2),
+                reducao_aliquota DECIMAL(5,2),
+                redutor_gov DECIMAL(5,2),
+                -- PIS/COFINS
+                tipo_retencao VARCHAR(10),
+                aliquota_pis DECIMAL(5,2),
+                aliquota_cofins DECIMAL(5,2),
+                -- Metadata
+                ativo BOOLEAN DEFAULT true,
+                criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        
+        // Índice para buscar prefeituras por dentista
+        try {
+            await pool.query('CREATE INDEX IF NOT EXISTS idx_config_pref_dentista ON config_prefeituras(dentista_id)');
+        } catch (e) {}
+
         console.log('Banco de dados inicializado!');
     } catch (error) {
         console.error('Erro ao inicializar banco:', error.message);
@@ -3321,6 +3371,347 @@ app.post('/api/casos-proteticos/:id/mensagens', authMiddleware, async (req, res)
     } catch (error) {
         console.error('Erro ao enviar mensagem:', error);
         res.status(500).json({ success: false, erro: 'Erro ao enviar mensagem' });
+    }
+});
+
+// ==============================================================================
+// ROTAS PREFEITURAS NFS-e
+// ==============================================================================
+
+// Templates de prefeituras pré-cadastradas (dados técnicos já configurados)
+const TEMPLATES_PREFEITURAS = [
+    {
+        id: 'pomerode-sc',
+        cidade: 'Pomerode',
+        uf: 'SC',
+        codigo_tom: '8273',
+        sistema: 'ipm',
+        url_webservice: 'https://ws-pomerode.atende.net:7443/?pg=rest&service=WNERestServiceNFSe',
+        serie_nfse: '1',
+        ambiente: 'producao',
+        aliquota_iss: 3.00,
+        codigo_servico: '8630504',
+        item_lista_servico: '4.11',
+        codigo_nbs: '1.1101.30.00',
+        situacao_tributaria: '1',
+        cst_ibs_cbs: '200',
+        class_trib: '200028',
+        fin_nfse: '0',
+        ind_final: '1',
+        c_ind_op: '030102',
+        aliquota_ibs_uf: 0.1,
+        aliquota_ibs_mun: 0,
+        aliquota_cbs: 0.9,
+        tipo_retencao: '2',
+        aliquota_pis: 0.65,
+        aliquota_cofins: 3.00
+    },
+    {
+        id: 'sao-paulo-sp',
+        cidade: 'São Paulo',
+        uf: 'SP',
+        codigo_tom: '7107',
+        sistema: 'nfpaulistana',
+        url_webservice: 'https://nfe.prefeitura.sp.gov.br/ws/lotenfe.asmx',
+        serie_nfse: 'RPS',
+        ambiente: 'producao',
+        aliquota_iss: 5.00,
+        codigo_servico: '05762',
+        item_lista_servico: '4.11',
+        codigo_nbs: '1.1101.30.00',
+        situacao_tributaria: '1',
+        cst_ibs_cbs: '200',
+        class_trib: '200028',
+        fin_nfse: '0',
+        ind_final: '1',
+        c_ind_op: '030102',
+        aliquota_ibs_uf: 0.1,
+        aliquota_ibs_mun: 0,
+        aliquota_cbs: 0.9,
+        tipo_retencao: '2',
+        aliquota_pis: 0.65,
+        aliquota_cofins: 3.00
+    },
+    {
+        id: 'blumenau-sc',
+        cidade: 'Blumenau',
+        uf: 'SC',
+        codigo_tom: '8059',
+        sistema: 'ipm',
+        url_webservice: 'https://ws-blumenau.atende.net:7443/?pg=rest&service=WNERestServiceNFSe',
+        serie_nfse: '1',
+        ambiente: 'producao',
+        aliquota_iss: 3.00,
+        codigo_servico: '8630504',
+        item_lista_servico: '4.11',
+        codigo_nbs: '1.1101.30.00',
+        situacao_tributaria: '1',
+        cst_ibs_cbs: '200',
+        class_trib: '200028',
+        fin_nfse: '0',
+        ind_final: '1',
+        c_ind_op: '030102',
+        aliquota_ibs_uf: 0.1,
+        aliquota_ibs_mun: 0,
+        aliquota_cbs: 0.9,
+        tipo_retencao: '2',
+        aliquota_pis: 0.65,
+        aliquota_cofins: 3.00
+    },
+    {
+        id: 'joinville-sc',
+        cidade: 'Joinville',
+        uf: 'SC',
+        codigo_tom: '8179',
+        sistema: 'ipm',
+        url_webservice: 'https://ws-joinville.atende.net:7443/?pg=rest&service=WNERestServiceNFSe',
+        serie_nfse: '1',
+        ambiente: 'producao',
+        aliquota_iss: 3.00,
+        codigo_servico: '8630504',
+        item_lista_servico: '4.11',
+        codigo_nbs: '1.1101.30.00',
+        situacao_tributaria: '1',
+        cst_ibs_cbs: '200',
+        class_trib: '200028',
+        fin_nfse: '0',
+        ind_final: '1',
+        c_ind_op: '030102',
+        aliquota_ibs_uf: 0.1,
+        aliquota_ibs_mun: 0,
+        aliquota_cbs: 0.9,
+        tipo_retencao: '2',
+        aliquota_pis: 0.65,
+        aliquota_cofins: 3.00
+    },
+    {
+        id: 'florianopolis-sc',
+        cidade: 'Florianópolis',
+        uf: 'SC',
+        codigo_tom: '8105',
+        sistema: 'betha',
+        url_webservice: 'https://e-gov.betha.com.br/e-nota-contribuinte-ws/nfseWS',
+        serie_nfse: '1',
+        ambiente: 'producao',
+        aliquota_iss: 3.00,
+        codigo_servico: '8630504',
+        item_lista_servico: '4.11',
+        codigo_nbs: '1.1101.30.00',
+        situacao_tributaria: '1',
+        cst_ibs_cbs: '200',
+        class_trib: '200028',
+        fin_nfse: '0',
+        ind_final: '1',
+        c_ind_op: '030102',
+        aliquota_ibs_uf: 0.1,
+        aliquota_ibs_mun: 0,
+        aliquota_cbs: 0.9,
+        tipo_retencao: '2',
+        aliquota_pis: 0.65,
+        aliquota_cofins: 3.00
+    },
+    {
+        id: 'curitiba-pr',
+        cidade: 'Curitiba',
+        uf: 'PR',
+        codigo_tom: '7535',
+        sistema: 'curitiba',
+        url_webservice: 'https://isscuritiba.curitiba.pr.gov.br/Iss.NfseWebService/nfsews.asmx',
+        serie_nfse: '1',
+        ambiente: 'producao',
+        aliquota_iss: 5.00,
+        codigo_servico: '4110',
+        item_lista_servico: '4.11',
+        codigo_nbs: '1.1101.30.00',
+        situacao_tributaria: '1',
+        cst_ibs_cbs: '200',
+        class_trib: '200028',
+        fin_nfse: '0',
+        ind_final: '1',
+        c_ind_op: '030102',
+        aliquota_ibs_uf: 0.1,
+        aliquota_ibs_mun: 0,
+        aliquota_cbs: 0.9,
+        tipo_retencao: '2',
+        aliquota_pis: 0.65,
+        aliquota_cofins: 3.00
+    }
+];
+
+// GET - Listar templates de prefeituras disponíveis
+app.get('/api/prefeituras/templates', (req, res) => {
+    res.json({
+        success: true,
+        templates: TEMPLATES_PREFEITURAS.map(t => ({
+            id: t.id,
+            cidade: t.cidade,
+            uf: t.uf,
+            sistema: t.sistema
+        }))
+    });
+});
+
+// GET - Obter template completo por ID
+app.get('/api/prefeituras/templates/:id', (req, res) => {
+    const template = TEMPLATES_PREFEITURAS.find(t => t.id === req.params.id);
+    if (!template) {
+        return res.status(404).json({ success: false, erro: 'Template não encontrado' });
+    }
+    res.json({ success: true, template });
+});
+
+// GET - Listar prefeituras configuradas do dentista
+app.get('/api/prefeituras', authMiddleware, async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT id, cidade, uf, codigo_tom, sistema, url_webservice, cpf_cnpj_prestador,
+                   serie_nfse, ambiente, exige_certificado, aliquota_iss, codigo_servico,
+                   item_lista_servico, codigo_nbs, situacao_tributaria, cst_ibs_cbs,
+                   class_trib, fin_nfse, ind_final, c_ind_op, aliquota_ibs_uf,
+                   aliquota_ibs_mun, aliquota_cbs, reducao_aliquota, redutor_gov,
+                   tipo_retencao, aliquota_pis, aliquota_cofins, ativo, criado_em
+            FROM config_prefeituras 
+            WHERE dentista_id = $1 
+            ORDER BY cidade
+        `, [req.dentistaId]);
+        
+        res.json({ success: true, prefeituras: result.rows });
+    } catch (error) {
+        console.error('Erro ao listar prefeituras:', error);
+        res.status(500).json({ success: false, erro: error.message });
+    }
+});
+
+// GET - Obter prefeitura específica
+app.get('/api/prefeituras/:id', authMiddleware, async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT * FROM config_prefeituras 
+            WHERE id = $1 AND dentista_id = $2
+        `, [req.params.id, req.dentistaId]);
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ success: false, erro: 'Prefeitura não encontrada' });
+        }
+        
+        res.json({ success: true, prefeitura: result.rows[0] });
+    } catch (error) {
+        console.error('Erro ao obter prefeitura:', error);
+        res.status(500).json({ success: false, erro: error.message });
+    }
+});
+
+// POST - Salvar nova prefeitura
+app.post('/api/prefeituras', authMiddleware, async (req, res) => {
+    try {
+        const {
+            cidade, uf, codigo_tom, sistema, url_webservice, cpf_cnpj_prestador,
+            senha_webservice, serie_nfse, ambiente, exige_certificado,
+            aliquota_iss, codigo_servico, item_lista_servico, codigo_nbs,
+            situacao_tributaria, cst_ibs_cbs, class_trib, fin_nfse, ind_final,
+            c_ind_op, aliquota_ibs_uf, aliquota_ibs_mun, aliquota_cbs,
+            reducao_aliquota, redutor_gov, tipo_retencao, aliquota_pis, aliquota_cofins
+        } = req.body;
+        
+        if (!cidade || !uf || !url_webservice) {
+            return res.status(400).json({ success: false, erro: 'Cidade, UF e URL são obrigatórios' });
+        }
+        
+        const result = await pool.query(`
+            INSERT INTO config_prefeituras (
+                dentista_id, cidade, uf, codigo_tom, sistema, url_webservice,
+                cpf_cnpj_prestador, senha_webservice, serie_nfse, ambiente, exige_certificado,
+                aliquota_iss, codigo_servico, item_lista_servico, codigo_nbs,
+                situacao_tributaria, cst_ibs_cbs, class_trib, fin_nfse, ind_final,
+                c_ind_op, aliquota_ibs_uf, aliquota_ibs_mun, aliquota_cbs,
+                reducao_aliquota, redutor_gov, tipo_retencao, aliquota_pis, aliquota_cofins
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)
+            RETURNING id
+        `, [
+            req.dentistaId, cidade, uf, codigo_tom, sistema || 'ipm', url_webservice,
+            cpf_cnpj_prestador, senha_webservice, serie_nfse || '1', ambiente || 'producao',
+            exige_certificado || false, aliquota_iss, codigo_servico, item_lista_servico,
+            codigo_nbs, situacao_tributaria, cst_ibs_cbs, class_trib, fin_nfse, ind_final,
+            c_ind_op, aliquota_ibs_uf, aliquota_ibs_mun, aliquota_cbs,
+            reducao_aliquota, redutor_gov, tipo_retencao, aliquota_pis, aliquota_cofins
+        ]);
+        
+        res.json({ success: true, id: result.rows[0].id, mensagem: 'Prefeitura salva com sucesso!' });
+    } catch (error) {
+        console.error('Erro ao salvar prefeitura:', error);
+        res.status(500).json({ success: false, erro: error.message });
+    }
+});
+
+// PUT - Atualizar prefeitura
+app.put('/api/prefeituras/:id', authMiddleware, async (req, res) => {
+    try {
+        const {
+            cidade, uf, codigo_tom, sistema, url_webservice, cpf_cnpj_prestador,
+            senha_webservice, serie_nfse, ambiente, exige_certificado,
+            aliquota_iss, codigo_servico, item_lista_servico, codigo_nbs,
+            situacao_tributaria, cst_ibs_cbs, class_trib, fin_nfse, ind_final,
+            c_ind_op, aliquota_ibs_uf, aliquota_ibs_mun, aliquota_cbs,
+            reducao_aliquota, redutor_gov, tipo_retencao, aliquota_pis, aliquota_cofins
+        } = req.body;
+        
+        // Monta query dinâmica (não atualiza senha se não foi enviada)
+        let query = `
+            UPDATE config_prefeituras SET
+                cidade = $1, uf = $2, codigo_tom = $3, sistema = $4, url_webservice = $5,
+                cpf_cnpj_prestador = $6, serie_nfse = $7, ambiente = $8, exige_certificado = $9,
+                aliquota_iss = $10, codigo_servico = $11, item_lista_servico = $12, codigo_nbs = $13,
+                situacao_tributaria = $14, cst_ibs_cbs = $15, class_trib = $16, fin_nfse = $17,
+                ind_final = $18, c_ind_op = $19, aliquota_ibs_uf = $20, aliquota_ibs_mun = $21,
+                aliquota_cbs = $22, reducao_aliquota = $23, redutor_gov = $24, tipo_retencao = $25,
+                aliquota_pis = $26, aliquota_cofins = $27, atualizado_em = CURRENT_TIMESTAMP
+        `;
+        
+        let params = [
+            cidade, uf, codigo_tom, sistema, url_webservice, cpf_cnpj_prestador,
+            serie_nfse, ambiente, exige_certificado, aliquota_iss, codigo_servico,
+            item_lista_servico, codigo_nbs, situacao_tributaria, cst_ibs_cbs, class_trib,
+            fin_nfse, ind_final, c_ind_op, aliquota_ibs_uf, aliquota_ibs_mun, aliquota_cbs,
+            reducao_aliquota, redutor_gov, tipo_retencao, aliquota_pis, aliquota_cofins
+        ];
+        
+        // Se senha foi enviada, atualiza também
+        if (senha_webservice) {
+            query += `, senha_webservice = $28 WHERE id = $29 AND dentista_id = $30`;
+            params.push(senha_webservice, req.params.id, req.dentistaId);
+        } else {
+            query += ` WHERE id = $28 AND dentista_id = $29`;
+            params.push(req.params.id, req.dentistaId);
+        }
+        
+        const result = await pool.query(query, params);
+        
+        if (result.rowCount === 0) {
+            return res.status(404).json({ success: false, erro: 'Prefeitura não encontrada' });
+        }
+        
+        res.json({ success: true, mensagem: 'Prefeitura atualizada!' });
+    } catch (error) {
+        console.error('Erro ao atualizar prefeitura:', error);
+        res.status(500).json({ success: false, erro: error.message });
+    }
+});
+
+// DELETE - Excluir prefeitura
+app.delete('/api/prefeituras/:id', authMiddleware, async (req, res) => {
+    try {
+        const result = await pool.query(`
+            DELETE FROM config_prefeituras WHERE id = $1 AND dentista_id = $2
+        `, [req.params.id, req.dentistaId]);
+        
+        if (result.rowCount === 0) {
+            return res.status(404).json({ success: false, erro: 'Prefeitura não encontrada' });
+        }
+        
+        res.json({ success: true, mensagem: 'Prefeitura excluída!' });
+    } catch (error) {
+        console.error('Erro ao excluir prefeitura:', error);
+        res.status(500).json({ success: false, erro: error.message });
     }
 });
 

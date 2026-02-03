@@ -485,7 +485,8 @@ async function initDatabase() {
                 -- Tributação ISS
                 aliquota_iss DECIMAL(5,2) DEFAULT 3.00,
                 codigo_servico VARCHAR(20),
-                item_lista_servico VARCHAR(20) DEFAULT '4.11',
+                item_lista_servico VARCHAR(20) DEFAULT '4.12',
+                codigo_trib_nacional VARCHAR(10) DEFAULT '041201',
                 codigo_nbs VARCHAR(30),
                 situacao_tributaria VARCHAR(10) DEFAULT '1',
                 -- Reforma Tributária 2026 (IBS/CBS)
@@ -513,6 +514,25 @@ async function initDatabase() {
         // Índice para buscar prefeituras por dentista
         try {
             await pool.query('CREATE INDEX IF NOT EXISTS idx_config_pref_dentista ON config_prefeituras(dentista_id)');
+        } catch (e) {}
+        
+        // Adicionar nova coluna codigo_trib_nacional se não existir (para bancos existentes)
+        try {
+            await pool.query(`
+                ALTER TABLE config_prefeituras 
+                ADD COLUMN IF NOT EXISTS codigo_trib_nacional VARCHAR(10) DEFAULT '041201'
+            `);
+            console.log('Coluna codigo_trib_nacional verificada/adicionada');
+        } catch (e) {
+            // Coluna já existe ou erro - ignorar
+        }
+        
+        // Corrigir valor padrão de item_lista_servico (era 4.11, agora é 4.12)
+        try {
+            await pool.query(`
+                ALTER TABLE config_prefeituras 
+                ALTER COLUMN item_lista_servico SET DEFAULT '4.12'
+            `);
         } catch (e) {}
 
         console.log('Banco de dados inicializado!');
@@ -3607,7 +3627,7 @@ app.post('/api/prefeituras', authMiddleware, async (req, res) => {
         const {
             cidade, uf, codigo_tom, sistema, url_webservice, cpf_cnpj_prestador,
             senha_webservice, serie_nfse, ambiente, exige_certificado,
-            aliquota_iss, codigo_servico, item_lista_servico, codigo_nbs,
+            aliquota_iss, codigo_servico, item_lista_servico, codigo_trib_nacional, codigo_nbs,
             situacao_tributaria, cst_ibs_cbs, class_trib, fin_nfse, ind_final,
             c_ind_op, aliquota_ibs_uf, aliquota_ibs_mun, aliquota_cbs,
             reducao_aliquota, redutor_gov, tipo_retencao, aliquota_pis, aliquota_cofins
@@ -3621,17 +3641,17 @@ app.post('/api/prefeituras', authMiddleware, async (req, res) => {
             INSERT INTO config_prefeituras (
                 dentista_id, cidade, uf, codigo_tom, sistema, url_webservice,
                 cpf_cnpj_prestador, senha_webservice, serie_nfse, ambiente, exige_certificado,
-                aliquota_iss, codigo_servico, item_lista_servico, codigo_nbs,
+                aliquota_iss, codigo_servico, item_lista_servico, codigo_trib_nacional, codigo_nbs,
                 situacao_tributaria, cst_ibs_cbs, class_trib, fin_nfse, ind_final,
                 c_ind_op, aliquota_ibs_uf, aliquota_ibs_mun, aliquota_cbs,
                 reducao_aliquota, redutor_gov, tipo_retencao, aliquota_pis, aliquota_cofins
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30)
             RETURNING id
         `, [
             req.dentistaId, cidade, uf, codigo_tom, sistema || 'ipm', url_webservice,
             cpf_cnpj_prestador, senha_webservice, serie_nfse || '1', ambiente || 'producao',
             exige_certificado || false, aliquota_iss, codigo_servico, item_lista_servico,
-            codigo_nbs, situacao_tributaria, cst_ibs_cbs, class_trib, fin_nfse, ind_final,
+            codigo_trib_nacional || '041201', codigo_nbs, situacao_tributaria, cst_ibs_cbs, class_trib, fin_nfse, ind_final,
             c_ind_op, aliquota_ibs_uf, aliquota_ibs_mun, aliquota_cbs,
             reducao_aliquota, redutor_gov, tipo_retencao, aliquota_pis, aliquota_cofins
         ]);
@@ -3649,7 +3669,7 @@ app.put('/api/prefeituras/:id', authMiddleware, async (req, res) => {
         const {
             cidade, uf, codigo_tom, sistema, url_webservice, cpf_cnpj_prestador,
             senha_webservice, serie_nfse, ambiente, exige_certificado,
-            aliquota_iss, codigo_servico, item_lista_servico, codigo_nbs,
+            aliquota_iss, codigo_servico, item_lista_servico, codigo_trib_nacional, codigo_nbs,
             situacao_tributaria, cst_ibs_cbs, class_trib, fin_nfse, ind_final,
             c_ind_op, aliquota_ibs_uf, aliquota_ibs_mun, aliquota_cbs,
             reducao_aliquota, redutor_gov, tipo_retencao, aliquota_pis, aliquota_cofins
@@ -3660,27 +3680,29 @@ app.put('/api/prefeituras/:id', authMiddleware, async (req, res) => {
             UPDATE config_prefeituras SET
                 cidade = $1, uf = $2, codigo_tom = $3, sistema = $4, url_webservice = $5,
                 cpf_cnpj_prestador = $6, serie_nfse = $7, ambiente = $8, exige_certificado = $9,
-                aliquota_iss = $10, codigo_servico = $11, item_lista_servico = $12, codigo_nbs = $13,
-                situacao_tributaria = $14, cst_ibs_cbs = $15, class_trib = $16, fin_nfse = $17,
-                ind_final = $18, c_ind_op = $19, aliquota_ibs_uf = $20, aliquota_ibs_mun = $21,
-                aliquota_cbs = $22, reducao_aliquota = $23, redutor_gov = $24, tipo_retencao = $25,
-                aliquota_pis = $26, aliquota_cofins = $27, atualizado_em = CURRENT_TIMESTAMP
+                aliquota_iss = $10, codigo_servico = $11, item_lista_servico = $12, 
+                codigo_trib_nacional = $13, codigo_nbs = $14,
+                situacao_tributaria = $15, cst_ibs_cbs = $16, class_trib = $17, fin_nfse = $18,
+                ind_final = $19, c_ind_op = $20, aliquota_ibs_uf = $21, aliquota_ibs_mun = $22,
+                aliquota_cbs = $23, reducao_aliquota = $24, redutor_gov = $25, tipo_retencao = $26,
+                aliquota_pis = $27, aliquota_cofins = $28, atualizado_em = CURRENT_TIMESTAMP
         `;
         
         let params = [
             cidade, uf, codigo_tom, sistema, url_webservice, cpf_cnpj_prestador,
             serie_nfse, ambiente, exige_certificado, aliquota_iss, codigo_servico,
-            item_lista_servico, codigo_nbs, situacao_tributaria, cst_ibs_cbs, class_trib,
+            item_lista_servico, codigo_trib_nacional || '041201', codigo_nbs, 
+            situacao_tributaria, cst_ibs_cbs, class_trib,
             fin_nfse, ind_final, c_ind_op, aliquota_ibs_uf, aliquota_ibs_mun, aliquota_cbs,
             reducao_aliquota, redutor_gov, tipo_retencao, aliquota_pis, aliquota_cofins
         ];
         
         // Se senha foi enviada, atualiza também
         if (senha_webservice) {
-            query += `, senha_webservice = $28 WHERE id = $29 AND dentista_id = $30`;
+            query += `, senha_webservice = $29 WHERE id = $30 AND dentista_id = $31`;
             params.push(senha_webservice, req.params.id, req.dentistaId);
         } else {
-            query += ` WHERE id = $28 AND dentista_id = $29`;
+            query += ` WHERE id = $29 AND dentista_id = $30`;
             params.push(req.params.id, req.dentistaId);
         }
         

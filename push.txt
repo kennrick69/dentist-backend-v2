@@ -1,0 +1,7 @@
+C:\Users\sss\Desktop\dentist-backend-v2
+
+
+git add server.js
+git commit -m "fix: verificar senha null no login"
+
+git push

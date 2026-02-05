@@ -536,6 +536,29 @@ async function initDatabase() {
             `);
         } catch (e) {}
 
+        // Tabela de usuários vinculados (secretárias, auxiliares, etc)
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS usuarios_vinculados (
+                id SERIAL PRIMARY KEY,
+                dentista_id INTEGER REFERENCES dentistas(id) ON DELETE CASCADE,
+                nome VARCHAR(255) NOT NULL,
+                email VARCHAR(255) NOT NULL,
+                senha VARCHAR(255) NOT NULL,
+                cargo VARCHAR(100),
+                ativo BOOLEAN DEFAULT true,
+                -- Permissões (JSON com lista de módulos permitidos)
+                permissoes JSONB DEFAULT '["agenda", "pacientes_visualizar"]',
+                criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(dentista_id, email)
+            )
+        `);
+        
+        // Índice para buscar usuários por dentista
+        try {
+            await pool.query('CREATE INDEX IF NOT EXISTS idx_usuarios_vinc_dentista ON usuarios_vinculados(dentista_id)');
+        } catch (e) {}
+
         console.log('Banco de dados inicializado!');
     } catch (error) {
         console.error('Erro ao inicializar banco:', error.message);
@@ -602,9 +625,52 @@ function authMiddleware(req, res, next) {
             }
             return res.status(403).json({ success: false, erro: 'Token inválido' });
         }
+        
+        // Compatibilidade: se não tem tipo, é dentista (tokens antigos)
+        if (!decoded.tipo) {
+            decoded.tipo = 'dentista';
+            decoded.permissoes = ['*']; // Acesso total
+        }
+        
+        // Para usuários vinculados, o dentistaId vem do token
+        if (decoded.tipo === 'usuario') {
+            req.dentistaId = decoded.dentista_id;
+            req.usuarioId = decoded.id;
+            req.tipoUsuario = 'usuario';
+            req.permissoes = decoded.permissoes || [];
+            req.nomeUsuario = decoded.nome;
+        } else {
+            // Dentista normal
+            req.dentistaId = decoded.id;
+            req.usuarioId = null;
+            req.tipoUsuario = 'dentista';
+            req.permissoes = ['*']; // Acesso total
+            req.nomeUsuario = decoded.nome;
+        }
+        
         req.user = decoded;
         next();
     });
+}
+
+// Middleware para verificar permissão específica
+function verificarPermissao(permissaoNecessaria) {
+    return (req, res, next) => {
+        // Dentista tem acesso total
+        if (req.tipoUsuario === 'dentista' || req.permissoes.includes('*')) {
+            return next();
+        }
+        
+        // Verifica se usuário tem a permissão
+        if (req.permissoes.includes(permissaoNecessaria)) {
+            return next();
+        }
+        
+        return res.status(403).json({ 
+            success: false, 
+            erro: 'Você não tem permissão para acessar este recurso' 
+        });
+    };
 }
 
 // ==============================================================================
@@ -878,62 +944,132 @@ app.post('/api/auth/login', async (req, res) => {
             return res.status(400).json({ success: false, erro: 'Email e senha obrigatórios' });
         }
 
-        const result = await pool.query('SELECT * FROM dentistas WHERE email = $1', [email.toLowerCase()]);
-        if (result.rows.length === 0) {
-            return res.status(401).json({ success: false, erro: 'Email ou senha incorretos' });
-        }
-
-        const dentista = result.rows[0];
+        const emailLower = email.toLowerCase();
         
-        // Verificar se email foi confirmado (apenas se a coluna existir e for false)
-        // Se email_confirmado for null/undefined, permite login (para usuários antigos)
-        if (dentista.email_confirmado === false) {
-            return res.status(403).json({ 
-                success: false, 
-                erro: 'Email não confirmado. Verifique sua caixa de entrada.',
-                emailNaoConfirmado: true,
-                email: dentista.email
+        // 1. Primeiro tenta como dentista
+        const resultDentista = await pool.query('SELECT * FROM dentistas WHERE email = $1', [emailLower]);
+        
+        if (resultDentista.rows.length > 0) {
+            const dentista = resultDentista.rows[0];
+            
+            // Verificar se email foi confirmado
+            if (dentista.email_confirmado === false) {
+                return res.status(403).json({ 
+                    success: false, 
+                    erro: 'Email não confirmado. Verifique sua caixa de entrada.',
+                    emailNaoConfirmado: true,
+                    email: dentista.email
+                });
+            }
+            
+            // Verificar senha
+            const senhaHash = dentista.senha || dentista.password;
+            if (!senhaHash) {
+                return res.status(401).json({ success: false, erro: 'Email ou senha incorretos' });
+            }
+            const senhaValida = await bcrypt.compare(password, senhaHash);
+            if (!senhaValida) {
+                return res.status(401).json({ success: false, erro: 'Email ou senha incorretos' });
+            }
+
+            // Verificar se conta está desativada
+            if (dentista.subscription_active === false || dentista.ativo === false) {
+                return res.status(403).json({ success: false, erro: 'Conta desativada' });
+            }
+
+            const nome = dentista.nome || dentista.name;
+
+            const token = jwt.sign(
+                { 
+                    id: dentista.id.toString(), 
+                    email: dentista.email, 
+                    nome: nome,
+                    tipo: 'dentista',
+                    permissoes: ['*']
+                },
+                JWT_SECRET,
+                { expiresIn: '30d' }
+            );
+
+            return res.json({
+                success: true,
+                message: 'Login realizado!',
+                token,
+                tipo: 'dentista',
+                dentista: {
+                    id: dentista.id.toString(),
+                    nome: nome,
+                    cro: dentista.cro,
+                    email: dentista.email,
+                    clinica: dentista.clinica || dentista.clinic,
+                    especialidade: dentista.especialidade || dentista.specialty,
+                    plano: dentista.subscription_plan || dentista.plano || 'premium'
+                }
             });
         }
         
-        // Verificar senha (suporta ambos os nomes de coluna)
-        const senhaHash = dentista.senha || dentista.password;
-        if (!senhaHash) {
-            return res.status(401).json({ success: false, erro: 'Email ou senha incorretos' });
-        }
-        const senhaValida = await bcrypt.compare(password, senhaHash);
-        if (!senhaValida) {
-            return res.status(401).json({ success: false, erro: 'Email ou senha incorretos' });
-        }
-
-        // Verificar se conta está desativada
-        if (dentista.subscription_active === false || dentista.ativo === false) {
-            return res.status(403).json({ success: false, erro: 'Conta desativada' });
-        }
-
-        // Pegar nome (suporta ambos os nomes de coluna)
-        const nome = dentista.nome || dentista.name;
-
-        const token = jwt.sign(
-            { id: dentista.id.toString(), email: dentista.email, nome: nome },
-            JWT_SECRET,
-            { expiresIn: '30d' }
-        );
-
-        res.json({
-            success: true,
-            message: 'Login realizado!',
-            token,
-            dentista: {
-                id: dentista.id.toString(),
-                nome: nome,
-                cro: dentista.cro,
-                email: dentista.email,
-                clinica: dentista.clinica || dentista.clinic,
-                especialidade: dentista.especialidade || dentista.specialty,
-                plano: dentista.subscription_plan || dentista.plano || 'premium'
+        // 2. Se não encontrou como dentista, tenta como usuário vinculado
+        const resultUsuario = await pool.query(`
+            SELECT u.*, d.nome as dentista_nome, d.clinica, d.cro
+            FROM usuarios_vinculados u
+            JOIN dentistas d ON u.dentista_id = d.id
+            WHERE u.email = $1 AND u.ativo = true AND d.ativo = true
+        `, [emailLower]);
+        
+        if (resultUsuario.rows.length > 0) {
+            const usuario = resultUsuario.rows[0];
+            
+            // Verificar senha
+            const senhaValida = await bcrypt.compare(password, usuario.senha);
+            if (!senhaValida) {
+                return res.status(401).json({ success: false, erro: 'Email ou senha incorretos' });
             }
-        });
+            
+            // Parse permissões
+            let permissoes = [];
+            try {
+                permissoes = typeof usuario.permissoes === 'string' 
+                    ? JSON.parse(usuario.permissoes) 
+                    : usuario.permissoes || [];
+            } catch (e) {
+                permissoes = [];
+            }
+
+            const token = jwt.sign(
+                { 
+                    id: usuario.id.toString(),
+                    dentista_id: usuario.dentista_id.toString(),
+                    email: usuario.email, 
+                    nome: usuario.nome,
+                    tipo: 'usuario',
+                    cargo: usuario.cargo,
+                    permissoes: permissoes
+                },
+                JWT_SECRET,
+                { expiresIn: '30d' }
+            );
+
+            return res.json({
+                success: true,
+                message: 'Login realizado!',
+                token,
+                tipo: 'usuario',
+                usuario: {
+                    id: usuario.id.toString(),
+                    nome: usuario.nome,
+                    email: usuario.email,
+                    cargo: usuario.cargo,
+                    permissoes: permissoes,
+                    dentista_id: usuario.dentista_id.toString(),
+                    dentista_nome: usuario.dentista_nome,
+                    clinica: usuario.clinica
+                }
+            });
+        }
+        
+        // Não encontrou em nenhuma tabela
+        return res.status(401).json({ success: false, erro: 'Email ou senha incorretos' });
+
     } catch (error) {
         console.error('Erro login:', error);
         res.status(500).json({ success: false, erro: 'Erro interno' });
@@ -1429,6 +1565,255 @@ app.put('/api/config-clinica', authMiddleware, async (req, res) => {
     } catch (error) {
         console.error('Erro salvar config:', error);
         res.status(500).json({ success: false, erro: 'Erro ao salvar configurações' });
+    }
+});
+
+// ==============================================================================
+// ROTAS DE USUÁRIOS VINCULADOS (Secretárias, Auxiliares, etc)
+// ==============================================================================
+
+// Lista de permissões disponíveis
+const PERMISSOES_DISPONIVEIS = [
+    { id: 'agenda', nome: 'Agenda', descricao: 'Visualizar e gerenciar agendamentos' },
+    { id: 'agenda_editar', nome: 'Agenda - Editar', descricao: 'Criar, editar e excluir agendamentos' },
+    { id: 'pacientes_visualizar', nome: 'Pacientes - Visualizar', descricao: 'Ver lista e dados básicos de pacientes' },
+    { id: 'pacientes_editar', nome: 'Pacientes - Editar', descricao: 'Cadastrar e editar pacientes' },
+    { id: 'prontuario', nome: 'Prontuário', descricao: 'Acessar prontuários e anamnese' },
+    { id: 'odontograma', nome: 'Odontograma', descricao: 'Visualizar e editar odontograma' },
+    { id: 'plano_tratamento', nome: 'Plano de Tratamento', descricao: 'Criar e editar planos de tratamento' },
+    { id: 'financeiro_visualizar', nome: 'Financeiro - Visualizar', descricao: 'Ver recebimentos e pagamentos' },
+    { id: 'financeiro_editar', nome: 'Financeiro - Editar', descricao: 'Registrar recebimentos e pagamentos' },
+    { id: 'laboratorio', nome: 'Laboratório', descricao: 'Gerenciar casos protéticos' },
+    { id: 'nfse', nome: 'Notas Fiscais', descricao: 'Emitir e gerenciar NFS-e' },
+    { id: 'relatorios', nome: 'Relatórios', descricao: 'Acessar relatórios e dashboard' },
+    { id: 'configuracoes', nome: 'Configurações', descricao: 'Alterar configurações do sistema' },
+    { id: 'usuarios', nome: 'Gerenciar Usuários', descricao: 'Criar e gerenciar usuários vinculados' }
+];
+
+// Listar permissões disponíveis
+app.get('/api/usuarios/permissoes-disponiveis', authMiddleware, (req, res) => {
+    res.json({ success: true, permissoes: PERMISSOES_DISPONIVEIS });
+});
+
+// Listar usuários vinculados do dentista
+app.get('/api/usuarios', authMiddleware, async (req, res) => {
+    try {
+        // Apenas dentistas podem ver usuários
+        if (req.tipoUsuario !== 'dentista') {
+            return res.status(403).json({ success: false, erro: 'Apenas o dentista pode gerenciar usuários' });
+        }
+        
+        const dentistaId = req.user.id;
+        
+        const result = await pool.query(`
+            SELECT id, nome, email, cargo, ativo, permissoes, criado_em, atualizado_em
+            FROM usuarios_vinculados
+            WHERE dentista_id = $1
+            ORDER BY nome
+        `, [dentistaId]);
+        
+        // Parse permissões
+        const usuarios = result.rows.map(u => ({
+            ...u,
+            permissoes: typeof u.permissoes === 'string' ? JSON.parse(u.permissoes) : u.permissoes
+        }));
+        
+        res.json({ success: true, usuarios });
+    } catch (error) {
+        console.error('Erro listar usuarios:', error);
+        res.status(500).json({ success: false, erro: 'Erro ao listar usuários' });
+    }
+});
+
+// Criar novo usuário vinculado
+app.post('/api/usuarios', authMiddleware, async (req, res) => {
+    try {
+        // Apenas dentistas podem criar usuários
+        if (req.tipoUsuario !== 'dentista') {
+            return res.status(403).json({ success: false, erro: 'Apenas o dentista pode criar usuários' });
+        }
+        
+        const dentistaId = req.user.id;
+        const { nome, email, senha, cargo, permissoes } = req.body;
+        
+        // Validações
+        if (!nome || !email || !senha) {
+            return res.status(400).json({ success: false, erro: 'Nome, email e senha são obrigatórios' });
+        }
+        
+        if (senha.length < 6) {
+            return res.status(400).json({ success: false, erro: 'Senha deve ter no mínimo 6 caracteres' });
+        }
+        
+        const emailLower = email.toLowerCase();
+        
+        // Verificar se email já existe (como dentista ou usuário)
+        const existeDentista = await pool.query('SELECT id FROM dentistas WHERE email = $1', [emailLower]);
+        if (existeDentista.rows.length > 0) {
+            return res.status(400).json({ success: false, erro: 'Este email já está em uso' });
+        }
+        
+        const existeUsuario = await pool.query(
+            'SELECT id FROM usuarios_vinculados WHERE email = $1',
+            [emailLower]
+        );
+        if (existeUsuario.rows.length > 0) {
+            return res.status(400).json({ success: false, erro: 'Este email já está em uso' });
+        }
+        
+        // Hash da senha
+        const senhaHash = await bcrypt.hash(senha, 10);
+        
+        // Permissões padrão se não informadas
+        const permsArray = permissoes || ['agenda', 'pacientes_visualizar'];
+        
+        const result = await pool.query(`
+            INSERT INTO usuarios_vinculados (dentista_id, nome, email, senha, cargo, permissoes)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            RETURNING id, nome, email, cargo, ativo, permissoes, criado_em
+        `, [dentistaId, nome, emailLower, senhaHash, cargo || 'Secretária', JSON.stringify(permsArray)]);
+        
+        const usuario = result.rows[0];
+        usuario.permissoes = permsArray;
+        
+        res.json({ success: true, message: 'Usuário criado com sucesso!', usuario });
+    } catch (error) {
+        console.error('Erro criar usuario:', error);
+        if (error.code === '23505') {
+            return res.status(400).json({ success: false, erro: 'Este email já está em uso' });
+        }
+        res.status(500).json({ success: false, erro: 'Erro ao criar usuário' });
+    }
+});
+
+// Atualizar usuário vinculado
+app.put('/api/usuarios/:id', authMiddleware, async (req, res) => {
+    try {
+        // Apenas dentistas podem editar usuários
+        if (req.tipoUsuario !== 'dentista') {
+            return res.status(403).json({ success: false, erro: 'Apenas o dentista pode editar usuários' });
+        }
+        
+        const dentistaId = req.user.id;
+        const usuarioId = validarId(req.params.id);
+        
+        if (!usuarioId) {
+            return res.status(400).json({ success: false, erro: 'ID inválido' });
+        }
+        
+        const { nome, email, senha, cargo, permissoes, ativo } = req.body;
+        
+        // Verificar se usuário pertence ao dentista
+        const existe = await pool.query(
+            'SELECT id FROM usuarios_vinculados WHERE id = $1 AND dentista_id = $2',
+            [usuarioId, dentistaId]
+        );
+        if (existe.rows.length === 0) {
+            return res.status(404).json({ success: false, erro: 'Usuário não encontrado' });
+        }
+        
+        // Montar query dinâmica
+        const campos = [];
+        const valores = [];
+        let idx = 1;
+        
+        if (nome) {
+            campos.push(`nome = $${idx++}`);
+            valores.push(nome);
+        }
+        if (email) {
+            // Verificar se novo email já existe
+            const emailLower = email.toLowerCase();
+            const existeEmail = await pool.query(
+                'SELECT id FROM usuarios_vinculados WHERE email = $1 AND id != $2',
+                [emailLower, usuarioId]
+            );
+            if (existeEmail.rows.length > 0) {
+                return res.status(400).json({ success: false, erro: 'Este email já está em uso' });
+            }
+            const existeDentista = await pool.query('SELECT id FROM dentistas WHERE email = $1', [emailLower]);
+            if (existeDentista.rows.length > 0) {
+                return res.status(400).json({ success: false, erro: 'Este email já está em uso' });
+            }
+            campos.push(`email = $${idx++}`);
+            valores.push(emailLower);
+        }
+        if (senha) {
+            if (senha.length < 6) {
+                return res.status(400).json({ success: false, erro: 'Senha deve ter no mínimo 6 caracteres' });
+            }
+            const senhaHash = await bcrypt.hash(senha, 10);
+            campos.push(`senha = $${idx++}`);
+            valores.push(senhaHash);
+        }
+        if (cargo !== undefined) {
+            campos.push(`cargo = $${idx++}`);
+            valores.push(cargo);
+        }
+        if (permissoes !== undefined) {
+            campos.push(`permissoes = $${idx++}`);
+            valores.push(JSON.stringify(permissoes));
+        }
+        if (ativo !== undefined) {
+            campos.push(`ativo = $${idx++}`);
+            valores.push(ativo);
+        }
+        
+        if (campos.length === 0) {
+            return res.status(400).json({ success: false, erro: 'Nenhum campo para atualizar' });
+        }
+        
+        campos.push(`atualizado_em = CURRENT_TIMESTAMP`);
+        valores.push(usuarioId);
+        
+        const query = `
+            UPDATE usuarios_vinculados 
+            SET ${campos.join(', ')}
+            WHERE id = $${idx}
+            RETURNING id, nome, email, cargo, ativo, permissoes, criado_em, atualizado_em
+        `;
+        
+        const result = await pool.query(query, valores);
+        const usuario = result.rows[0];
+        usuario.permissoes = typeof usuario.permissoes === 'string' 
+            ? JSON.parse(usuario.permissoes) 
+            : usuario.permissoes;
+        
+        res.json({ success: true, message: 'Usuário atualizado!', usuario });
+    } catch (error) {
+        console.error('Erro atualizar usuario:', error);
+        res.status(500).json({ success: false, erro: 'Erro ao atualizar usuário' });
+    }
+});
+
+// Excluir usuário vinculado
+app.delete('/api/usuarios/:id', authMiddleware, async (req, res) => {
+    try {
+        // Apenas dentistas podem excluir usuários
+        if (req.tipoUsuario !== 'dentista') {
+            return res.status(403).json({ success: false, erro: 'Apenas o dentista pode excluir usuários' });
+        }
+        
+        const dentistaId = req.user.id;
+        const usuarioId = validarId(req.params.id);
+        
+        if (!usuarioId) {
+            return res.status(400).json({ success: false, erro: 'ID inválido' });
+        }
+        
+        const result = await pool.query(
+            'DELETE FROM usuarios_vinculados WHERE id = $1 AND dentista_id = $2 RETURNING id, nome',
+            [usuarioId, dentistaId]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ success: false, erro: 'Usuário não encontrado' });
+        }
+        
+        res.json({ success: true, message: `Usuário ${result.rows[0].nome} excluído!` });
+    } catch (error) {
+        console.error('Erro excluir usuario:', error);
+        res.status(500).json({ success: false, erro: 'Erro ao excluir usuário' });
     }
 });
 

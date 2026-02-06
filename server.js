@@ -605,6 +605,75 @@ async function initDatabase() {
         } catch (e) {}
 
         console.log('Banco de dados inicializado!');
+
+        // Tabelas de Anamnese, Receitas e Atestados
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS anamneses (
+                id SERIAL PRIMARY KEY,
+                dentista_id INTEGER REFERENCES dentistas(id) ON DELETE CASCADE,
+                paciente_id INTEGER REFERENCES pacientes(id) ON DELETE CASCADE,
+                peso DECIMAL(5,1),
+                altura DECIMAL(3,2),
+                pressao_arterial VARCHAR(20),
+                frequencia_cardiaca INTEGER,
+                diabetes BOOLEAN DEFAULT FALSE,
+                hipertensao BOOLEAN DEFAULT FALSE,
+                cardiopatia BOOLEAN DEFAULT FALSE,
+                hepatite BOOLEAN DEFAULT FALSE,
+                hiv BOOLEAN DEFAULT FALSE,
+                gestante BOOLEAN DEFAULT FALSE,
+                lactante BOOLEAN DEFAULT FALSE,
+                epilepsia BOOLEAN DEFAULT FALSE,
+                problema_renal BOOLEAN DEFAULT FALSE,
+                problema_respiratorio BOOLEAN DEFAULT FALSE,
+                problema_sangramento BOOLEAN DEFAULT FALSE,
+                problema_cicatrizacao BOOLEAN DEFAULT FALSE,
+                cancer BOOLEAN DEFAULT FALSE,
+                radioterapia BOOLEAN DEFAULT FALSE,
+                quimioterapia BOOLEAN DEFAULT FALSE,
+                alergia_anestesico BOOLEAN DEFAULT FALSE,
+                alergia_antibiotico BOOLEAN DEFAULT FALSE,
+                alergia_latex BOOLEAN DEFAULT FALSE,
+                alergia_outros BOOLEAN DEFAULT FALSE,
+                alergias_descricao TEXT,
+                fumante BOOLEAN DEFAULT FALSE,
+                etilista BOOLEAN DEFAULT FALSE,
+                usa_drogas BOOLEAN DEFAULT FALSE,
+                usa_medicamentos BOOLEAN DEFAULT FALSE,
+                medicamentos_descricao TEXT,
+                cirurgia_previa BOOLEAN DEFAULT FALSE,
+                cirurgias_descricao TEXT,
+                observacoes TEXT,
+                criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(dentista_id, paciente_id)
+            )
+        `);
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS receitas (
+                id SERIAL PRIMARY KEY,
+                dentista_id INTEGER REFERENCES dentistas(id) ON DELETE CASCADE,
+                paciente_id INTEGER REFERENCES pacientes(id) ON DELETE CASCADE,
+                tipo VARCHAR(20) DEFAULT 'simples',
+                medicamentos JSONB NOT NULL DEFAULT '[]',
+                observacoes TEXT,
+                criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS atestados (
+                id SERIAL PRIMARY KEY,
+                dentista_id INTEGER REFERENCES dentistas(id) ON DELETE CASCADE,
+                paciente_id INTEGER REFERENCES pacientes(id) ON DELETE CASCADE,
+                tipo VARCHAR(30) DEFAULT 'atestado',
+                dias INTEGER DEFAULT 1,
+                cid VARCHAR(20),
+                horario VARCHAR(50),
+                conteudo TEXT,
+                criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        console.log('Tabelas anamnese/receitas/atestados criadas!');
     } catch (error) {
         console.error('Erro ao inicializar banco:', error.message);
     }
@@ -2750,6 +2819,204 @@ app.post('/api/prontuarios', authMiddleware, async (req, res) => {
         res.status(201).json({ success: true, message: 'Registro adicionado!', prontuario: { id: result.rows[0].id.toString() } });
     } catch (error) {
         res.status(500).json({ success: false, erro: 'Erro ao adicionar registro' });
+    }
+});
+
+// ==============================================================================
+// ROTAS DE ANAMNESE
+// ==============================================================================
+
+app.get('/api/anamnese/:pacienteId', authMiddleware, async (req, res) => {
+    try {
+        const result = await pool.query(
+            'SELECT * FROM anamneses WHERE dentista_id = $1 AND paciente_id = $2',
+            [parseInt(req.user.id), parseInt(req.params.pacienteId)]
+        );
+        if (result.rows.length > 0) {
+            res.json({ success: true, anamnese: result.rows[0] });
+        } else {
+            res.json({ success: true, anamnese: null });
+        }
+    } catch (error) {
+        console.error('Erro anamnese GET:', error);
+        res.status(500).json({ success: false, erro: 'Erro ao buscar anamnese' });
+    }
+});
+
+app.get('/api/anamnese/:pacienteId/alertas', authMiddleware, async (req, res) => {
+    try {
+        const result = await pool.query(
+            'SELECT * FROM anamneses WHERE dentista_id = $1 AND paciente_id = $2',
+            [parseInt(req.user.id), parseInt(req.params.pacienteId)]
+        );
+        const alertas = [];
+        if (result.rows.length > 0) {
+            const a = result.rows[0];
+            // Alergias (crítico)
+            if (a.alergia_anestesico) alertas.push({ nome: 'Alergia Anestésico', tipo: 'critico' });
+            if (a.alergia_antibiotico) alertas.push({ nome: 'Alergia Antibiótico', tipo: 'critico' });
+            if (a.alergia_latex) alertas.push({ nome: 'Alergia Látex', tipo: 'critico' });
+            if (a.alergia_outros && a.alergias_descricao) alertas.push({ nome: a.alergias_descricao, tipo: 'alergia' });
+            // Condições críticas
+            if (a.hiv) alertas.push({ nome: 'HIV/AIDS', tipo: 'critico' });
+            if (a.gestante) alertas.push({ nome: 'Gestante', tipo: 'critico' });
+            if (a.epilepsia) alertas.push({ nome: 'Epilepsia', tipo: 'critico' });
+            if (a.problema_sangramento) alertas.push({ nome: 'Prob. Sangramento', tipo: 'critico' });
+            if (a.cancer) alertas.push({ nome: 'Câncer', tipo: 'critico' });
+            if (a.radioterapia) alertas.push({ nome: 'Radioterapia', tipo: 'critico' });
+            if (a.quimioterapia) alertas.push({ nome: 'Quimioterapia', tipo: 'critico' });
+            // Condições importantes
+            if (a.diabetes) alertas.push({ nome: 'Diabetes', tipo: 'importante' });
+            if (a.hipertensao) alertas.push({ nome: 'Hipertensão', tipo: 'importante' });
+            if (a.cardiopatia) alertas.push({ nome: 'Cardiopatia', tipo: 'importante' });
+            if (a.hepatite) alertas.push({ nome: 'Hepatite', tipo: 'importante' });
+            // Medicamentos
+            if (a.usa_medicamentos && a.medicamentos_descricao) alertas.push({ nome: 'Med: ' + a.medicamentos_descricao, tipo: 'alergia' });
+        }
+        res.json({ success: true, alertas });
+    } catch (error) {
+        console.error('Erro alertas:', error);
+        res.status(500).json({ success: false, erro: 'Erro ao buscar alertas' });
+    }
+});
+
+app.post('/api/anamnese', authMiddleware, async (req, res) => {
+    try {
+        const d = req.body;
+        const dentistaId = parseInt(req.user.id);
+        const pacienteId = parseInt(d.pacienteId);
+
+        const result = await pool.query(`
+            INSERT INTO anamneses (dentista_id, paciente_id, peso, altura, pressao_arterial, frequencia_cardiaca,
+                diabetes, hipertensao, cardiopatia, hepatite, hiv, gestante, lactante, epilepsia,
+                problema_renal, problema_respiratorio, problema_sangramento, problema_cicatrizacao,
+                cancer, radioterapia, quimioterapia,
+                alergia_anestesico, alergia_antibiotico, alergia_latex, alergia_outros, alergias_descricao,
+                fumante, etilista, usa_drogas, usa_medicamentos, medicamentos_descricao,
+                cirurgia_previa, cirurgias_descricao, observacoes, atualizado_em)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34, NOW())
+            ON CONFLICT (dentista_id, paciente_id) DO UPDATE SET
+                peso=EXCLUDED.peso, altura=EXCLUDED.altura, pressao_arterial=EXCLUDED.pressao_arterial,
+                frequencia_cardiaca=EXCLUDED.frequencia_cardiaca,
+                diabetes=EXCLUDED.diabetes, hipertensao=EXCLUDED.hipertensao, cardiopatia=EXCLUDED.cardiopatia,
+                hepatite=EXCLUDED.hepatite, hiv=EXCLUDED.hiv, gestante=EXCLUDED.gestante, lactante=EXCLUDED.lactante,
+                epilepsia=EXCLUDED.epilepsia, problema_renal=EXCLUDED.problema_renal,
+                problema_respiratorio=EXCLUDED.problema_respiratorio, problema_sangramento=EXCLUDED.problema_sangramento,
+                problema_cicatrizacao=EXCLUDED.problema_cicatrizacao, cancer=EXCLUDED.cancer,
+                radioterapia=EXCLUDED.radioterapia, quimioterapia=EXCLUDED.quimioterapia,
+                alergia_anestesico=EXCLUDED.alergia_anestesico, alergia_antibiotico=EXCLUDED.alergia_antibiotico,
+                alergia_latex=EXCLUDED.alergia_latex, alergia_outros=EXCLUDED.alergia_outros,
+                alergias_descricao=EXCLUDED.alergias_descricao,
+                fumante=EXCLUDED.fumante, etilista=EXCLUDED.etilista, usa_drogas=EXCLUDED.usa_drogas,
+                usa_medicamentos=EXCLUDED.usa_medicamentos, medicamentos_descricao=EXCLUDED.medicamentos_descricao,
+                cirurgia_previa=EXCLUDED.cirurgia_previa, cirurgias_descricao=EXCLUDED.cirurgias_descricao,
+                observacoes=EXCLUDED.observacoes, atualizado_em=NOW()
+            RETURNING id
+        `, [dentistaId, pacienteId, d.peso, d.altura, d.pressao_arterial, d.frequencia_cardiaca,
+            d.diabetes, d.hipertensao, d.cardiopatia, d.hepatite, d.hiv, d.gestante, d.lactante, d.epilepsia,
+            d.problema_renal, d.problema_respiratorio, d.problema_sangramento, d.problema_cicatrizacao,
+            d.cancer, d.radioterapia, d.quimioterapia,
+            d.alergia_anestesico, d.alergia_antibiotico, d.alergia_latex, d.alergia_outros, d.alergias_descricao,
+            d.fumante, d.etilista, d.usa_drogas, d.usa_medicamentos, d.medicamentos_descricao,
+            d.cirurgia_previa, d.cirurgias_descricao, d.observacoes]);
+
+        res.json({ success: true, message: 'Anamnese salva!' });
+    } catch (error) {
+        console.error('Erro anamnese POST:', error);
+        res.status(500).json({ success: false, erro: 'Erro ao salvar anamnese' });
+    }
+});
+
+// ==============================================================================
+// ROTAS DE RECEITAS
+// ==============================================================================
+
+app.get('/api/receitas/:pacienteId', authMiddleware, async (req, res) => {
+    try {
+        const result = await pool.query(
+            'SELECT * FROM receitas WHERE dentista_id = $1 AND paciente_id = $2 ORDER BY criado_em DESC',
+            [parseInt(req.user.id), parseInt(req.params.pacienteId)]
+        );
+        const receitas = result.rows.map(r => ({
+            id: r.id.toString(), tipo: r.tipo, medicamentos: r.medicamentos,
+            observacoes: r.observacoes, criadoEm: r.criado_em
+        }));
+        res.json({ success: true, receitas });
+    } catch (error) {
+        console.error('Erro receitas GET:', error);
+        res.status(500).json({ success: false, erro: 'Erro ao buscar receitas' });
+    }
+});
+
+app.post('/api/receitas', authMiddleware, async (req, res) => {
+    try {
+        const { pacienteId, tipo, medicamentos, observacoes } = req.body;
+        if (!pacienteId || !medicamentos?.length) {
+            return res.status(400).json({ success: false, erro: 'Paciente e medicamentos obrigatórios' });
+        }
+        const result = await pool.query(
+            'INSERT INTO receitas (dentista_id, paciente_id, tipo, medicamentos, observacoes) VALUES ($1,$2,$3,$4,$5) RETURNING id',
+            [parseInt(req.user.id), parseInt(pacienteId), tipo || 'simples', JSON.stringify(medicamentos), observacoes]
+        );
+        res.status(201).json({ success: true, message: 'Receita salva!', receita: { id: result.rows[0].id.toString() } });
+    } catch (error) {
+        console.error('Erro receita POST:', error);
+        res.status(500).json({ success: false, erro: 'Erro ao salvar receita' });
+    }
+});
+
+app.delete('/api/receitas/:id', authMiddleware, async (req, res) => {
+    try {
+        await pool.query('DELETE FROM receitas WHERE id = $1 AND dentista_id = $2', [parseInt(req.params.id), parseInt(req.user.id)]);
+        res.json({ success: true, message: 'Receita removida' });
+    } catch (error) {
+        res.status(500).json({ success: false, erro: 'Erro ao remover' });
+    }
+});
+
+// ==============================================================================
+// ROTAS DE ATESTADOS
+// ==============================================================================
+
+app.get('/api/atestados/:pacienteId', authMiddleware, async (req, res) => {
+    try {
+        const result = await pool.query(
+            'SELECT * FROM atestados WHERE dentista_id = $1 AND paciente_id = $2 ORDER BY criado_em DESC',
+            [parseInt(req.user.id), parseInt(req.params.pacienteId)]
+        );
+        const atestados = result.rows.map(a => ({
+            id: a.id.toString(), tipo: a.tipo, dias: a.dias, cid: a.cid,
+            horario: a.horario, conteudo: a.conteudo, criadoEm: a.criado_em
+        }));
+        res.json({ success: true, atestados });
+    } catch (error) {
+        console.error('Erro atestados GET:', error);
+        res.status(500).json({ success: false, erro: 'Erro ao buscar atestados' });
+    }
+});
+
+app.post('/api/atestados', authMiddleware, async (req, res) => {
+    try {
+        const { pacienteId, tipo, dias, cid, horario, conteudo } = req.body;
+        if (!pacienteId) return res.status(400).json({ success: false, erro: 'Paciente obrigatório' });
+
+        const result = await pool.query(
+            'INSERT INTO atestados (dentista_id, paciente_id, tipo, dias, cid, horario, conteudo) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id',
+            [parseInt(req.user.id), parseInt(pacienteId), tipo || 'atestado', dias || 1, cid, horario, conteudo]
+        );
+        res.status(201).json({ success: true, message: 'Atestado salvo!', atestado: { id: result.rows[0].id.toString() } });
+    } catch (error) {
+        console.error('Erro atestado POST:', error);
+        res.status(500).json({ success: false, erro: 'Erro ao salvar atestado' });
+    }
+});
+
+app.delete('/api/atestados/:id', authMiddleware, async (req, res) => {
+    try {
+        await pool.query('DELETE FROM atestados WHERE id = $1 AND dentista_id = $2', [parseInt(req.params.id), parseInt(req.user.id)]);
+        res.json({ success: true, message: 'Atestado removido' });
+    } catch (error) {
+        res.status(500).json({ success: false, erro: 'Erro ao remover' });
     }
 });
 

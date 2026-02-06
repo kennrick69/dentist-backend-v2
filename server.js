@@ -19,7 +19,7 @@ dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
-const JWT_SECRET = process.env.JWT_SECRET || 'dental-ultra-secret-key-change-in-production-2024';
+const JWT_SECRET = process.env.JWT_SECRET;
 
 // ==============================================================================
 // MIDDLEWARES
@@ -793,7 +793,7 @@ function verificarPermissao(permissaoNecessaria) {
 
 // Configuração do envio de email via PHP (Hostinger)
 const EMAIL_PHP_URL = process.env.EMAIL_PHP_URL || 'https://dentalultra.com.br/api/enviar-email.php';
-const EMAIL_CHAVE_SECRETA = process.env.EMAIL_CHAVE_SECRETA || 'DENTAL_ULTRA_EMAIL_2024_SECRETKEY';
+const EMAIL_CHAVE_SECRETA = process.env.EMAIL_CHAVE_SECRETA;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://dentalultra.com.br';
 
 // Função para gerar token aleatório

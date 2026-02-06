@@ -10,6 +10,7 @@ const dotenv = require('dotenv');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
+const axios = require('axios');
 
 dotenv.config();
 
@@ -455,6 +456,109 @@ async function initDatabase() {
             try { await pool.query(mig); } catch (e) {}
         }
 
+        // ============ MIGRAÇÕES - CONFIRMAÇÃO DE EMAIL ============
+        const migracoesEmail = [
+            "ALTER TABLE dentistas ADD COLUMN IF NOT EXISTS email_confirmado BOOLEAN DEFAULT false",
+            "ALTER TABLE dentistas ADD COLUMN IF NOT EXISTS token_confirmacao VARCHAR(64)",
+            "ALTER TABLE dentistas ADD COLUMN IF NOT EXISTS token_expira TIMESTAMP"
+        ];
+        for (const mig of migracoesEmail) {
+            try { await pool.query(mig); } catch (e) {}
+        }
+
+        // ============ MÓDULO NFS-e - CONFIGURAÇÕES DE PREFEITURAS ============
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS config_prefeituras (
+                id SERIAL PRIMARY KEY,
+                dentista_id INTEGER REFERENCES dentistas(id) ON DELETE CASCADE,
+                -- Identificação
+                cidade VARCHAR(100) NOT NULL,
+                uf CHAR(2) NOT NULL,
+                codigo_tom VARCHAR(20),
+                sistema VARCHAR(50) DEFAULT 'ipm',
+                -- Conexão
+                url_webservice TEXT NOT NULL,
+                cpf_cnpj_prestador VARCHAR(20),
+                senha_webservice VARCHAR(255),
+                serie_nfse VARCHAR(10) DEFAULT '1',
+                ambiente VARCHAR(20) DEFAULT 'producao',
+                exige_certificado BOOLEAN DEFAULT false,
+                -- Tributação ISS
+                aliquota_iss DECIMAL(5,2) DEFAULT 3.00,
+                codigo_servico VARCHAR(20),
+                item_lista_servico VARCHAR(20) DEFAULT '4.12',
+                codigo_trib_nacional VARCHAR(10) DEFAULT '041201',
+                codigo_nbs VARCHAR(30),
+                situacao_tributaria VARCHAR(10) DEFAULT '1',
+                -- Reforma Tributária 2026 (IBS/CBS)
+                cst_ibs_cbs VARCHAR(10),
+                class_trib VARCHAR(20),
+                fin_nfse VARCHAR(10),
+                ind_final VARCHAR(10),
+                c_ind_op VARCHAR(20),
+                aliquota_ibs_uf DECIMAL(5,2),
+                aliquota_ibs_mun DECIMAL(5,2),
+                aliquota_cbs DECIMAL(5,2),
+                reducao_aliquota DECIMAL(5,2),
+                redutor_gov DECIMAL(5,2),
+                -- PIS/COFINS
+                tipo_retencao VARCHAR(10),
+                aliquota_pis DECIMAL(5,2),
+                aliquota_cofins DECIMAL(5,2),
+                -- Metadata
+                ativo BOOLEAN DEFAULT true,
+                criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        
+        // Índice para buscar prefeituras por dentista
+        try {
+            await pool.query('CREATE INDEX IF NOT EXISTS idx_config_pref_dentista ON config_prefeituras(dentista_id)');
+        } catch (e) {}
+        
+        // Adicionar nova coluna codigo_trib_nacional se não existir (para bancos existentes)
+        try {
+            await pool.query(`
+                ALTER TABLE config_prefeituras 
+                ADD COLUMN IF NOT EXISTS codigo_trib_nacional VARCHAR(10) DEFAULT '041201'
+            `);
+            console.log('Coluna codigo_trib_nacional verificada/adicionada');
+        } catch (e) {
+            // Coluna já existe ou erro - ignorar
+        }
+        
+        // Corrigir valor padrão de item_lista_servico (era 4.11, agora é 4.12)
+        try {
+            await pool.query(`
+                ALTER TABLE config_prefeituras 
+                ALTER COLUMN item_lista_servico SET DEFAULT '4.12'
+            `);
+        } catch (e) {}
+
+        // Tabela de usuários vinculados (secretárias, auxiliares, etc)
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS usuarios_vinculados (
+                id SERIAL PRIMARY KEY,
+                dentista_id INTEGER REFERENCES dentistas(id) ON DELETE CASCADE,
+                nome VARCHAR(255) NOT NULL,
+                email VARCHAR(255) NOT NULL,
+                senha VARCHAR(255) NOT NULL,
+                cargo VARCHAR(100),
+                ativo BOOLEAN DEFAULT true,
+                -- Permissões (JSON com lista de módulos permitidos)
+                permissoes JSONB DEFAULT '["agenda", "pacientes_visualizar"]',
+                criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(dentista_id, email)
+            )
+        `);
+        
+        // Índice para buscar usuários por dentista
+        try {
+            await pool.query('CREATE INDEX IF NOT EXISTS idx_usuarios_vinc_dentista ON usuarios_vinculados(dentista_id)');
+        } catch (e) {}
+
         console.log('Banco de dados inicializado!');
     } catch (error) {
         console.error('Erro ao inicializar banco:', error.message);
@@ -521,14 +625,94 @@ function authMiddleware(req, res, next) {
             }
             return res.status(403).json({ success: false, erro: 'Token inválido' });
         }
+        
+        // Compatibilidade: se não tem tipo, é dentista (tokens antigos)
+        if (!decoded.tipo) {
+            decoded.tipo = 'dentista';
+            decoded.permissoes = ['*']; // Acesso total
+        }
+        
+        // Para usuários vinculados, o dentistaId vem do token
+        if (decoded.tipo === 'usuario') {
+            req.dentistaId = decoded.dentista_id;
+            req.usuarioId = decoded.id;
+            req.tipoUsuario = 'usuario';
+            req.permissoes = decoded.permissoes || [];
+            req.nomeUsuario = decoded.nome;
+        } else {
+            // Dentista normal
+            req.dentistaId = decoded.id;
+            req.usuarioId = null;
+            req.tipoUsuario = 'dentista';
+            req.permissoes = ['*']; // Acesso total
+            req.nomeUsuario = decoded.nome;
+        }
+        
         req.user = decoded;
         next();
     });
 }
 
+// Middleware para verificar permissão específica
+function verificarPermissao(permissaoNecessaria) {
+    return (req, res, next) => {
+        // Dentista tem acesso total
+        if (req.tipoUsuario === 'dentista' || req.permissoes.includes('*')) {
+            return next();
+        }
+        
+        // Verifica se usuário tem a permissão
+        if (req.permissoes.includes(permissaoNecessaria)) {
+            return next();
+        }
+        
+        return res.status(403).json({ 
+            success: false, 
+            erro: 'Você não tem permissão para acessar este recurso' 
+        });
+    };
+}
+
 // ==============================================================================
 // ROTAS DE AUTENTICAÇÃO
 // ==============================================================================
+
+// Configuração do envio de email via PHP (Hostinger)
+const EMAIL_PHP_URL = process.env.EMAIL_PHP_URL || 'https://dentalultra.com.br/api/enviar-email.php';
+const EMAIL_CHAVE_SECRETA = process.env.EMAIL_CHAVE_SECRETA || 'DENTAL_ULTRA_EMAIL_2024_SECRETKEY';
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://dentalultra.com.br';
+
+// Função para gerar token aleatório
+function gerarToken(tamanho = 32) {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    let token = '';
+    for (let i = 0; i < tamanho; i++) {
+        token += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return token;
+}
+
+// Função para enviar email via PHP
+async function enviarEmail(para, assunto, mensagemHtml) {
+    try {
+        const response = await fetch(EMAIL_PHP_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                chave: EMAIL_CHAVE_SECRETA,
+                para: para,
+                assunto: assunto,
+                mensagem: mensagemHtml,
+                tipo: 'html'
+            })
+        });
+        const data = await response.json();
+        return data.success;
+    } catch (error) {
+        console.error('Erro ao enviar email:', error);
+        return false;
+    }
+}
 
 app.post('/api/auth/register', async (req, res) => {
     try {
@@ -542,25 +726,213 @@ app.post('/api/auth/register', async (req, res) => {
             return res.status(400).json({ success: false, erro: 'Senha deve ter no mínimo 6 caracteres' });
         }
 
-        const existing = await pool.query('SELECT id FROM dentistas WHERE email = $1', [email.toLowerCase()]);
+        // Verificar se email já existe (SELECT * para pegar todas as colunas disponíveis)
+        const existing = await pool.query('SELECT * FROM dentistas WHERE email = $1', [email.toLowerCase()]);
         if (existing.rows.length > 0) {
+            const existingUser = existing.rows[0];
+            // Verificar se email_confirmado existe e é false (se a coluna não existir, considera como null)
+            const emailConfirmado = existingUser.email_confirmado;
+            
+            // Se já existe mas não confirmou (ou coluna não existe ainda), permite reenviar
+            if (emailConfirmado === false) {
+                const token = gerarToken();
+                const expira = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 horas
+                
+                await pool.query(
+                    'UPDATE dentistas SET token_confirmacao = $1, token_expira = $2 WHERE id = $3',
+                    [token, expira, existingUser.id]
+                );
+                
+                // Enviar email
+                const linkConfirmacao = `${FRONTEND_URL}/area-dentistas/confirmar-email.html?token=${token}`;
+                const emailHtml = `
+                    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+                        <div style="text-align: center; margin-bottom: 30px;">
+                            <h1 style="color: #1FA2FF;">🦷 Dental Ultra</h1>
+                        </div>
+                        <h2 style="color: #333;">Confirme seu email</h2>
+                        <p>Olá <strong>${name}</strong>,</p>
+                        <p>Você já iniciou um cadastro anteriormente. Clique no botão abaixo para confirmar seu email:</p>
+                        <div style="text-align: center; margin: 30px 0;">
+                            <a href="${linkConfirmacao}" style="background: linear-gradient(135deg, #1FA2FF, #12D8FA); color: white; padding: 15px 40px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block;">
+                                ✅ Confirmar Email
+                            </a>
+                        </div>
+                        <p style="color: #666; font-size: 14px;">Este link expira em 24 horas.</p>
+                        <p style="color: #666; font-size: 14px;">Se você não solicitou este cadastro, ignore este email.</p>
+                        <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+                        <p style="color: #999; font-size: 12px; text-align: center;">
+                            Dental Ultra - Sistema de Gestão Odontológica<br>
+                            suporte@dentalultra.com.br
+                        </p>
+                    </div>
+                `;
+                
+                await enviarEmail(email.toLowerCase(), '🦷 Confirme seu email - Dental Ultra', emailHtml);
+                
+                return res.status(200).json({
+                    success: true,
+                    message: 'Email de confirmação reenviado! Verifique sua caixa de entrada.',
+                    aguardandoConfirmacao: true
+                });
+            }
             return res.status(400).json({ success: false, erro: 'Email já cadastrado' });
         }
 
+        // Gerar token e data de expiração
+        const token = gerarToken();
+        const expira = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 horas
+
         const senhaHash = await bcrypt.hash(password, 10);
+        
+        // Inserir usando nomes das colunas existentes no banco (inglês)
         const result = await pool.query(
-            `INSERT INTO dentistas (name, cro, email, password, clinic, specialty)
-             VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, name, cro, email, clinic, specialty`,
-            [name, cro, email.toLowerCase(), senhaHash, clinic || '', specialty || '']
+            `INSERT INTO dentistas (name, cro, email, password, clinic, specialty, email_confirmado, token_confirmacao, token_expira)
+             VALUES ($1, $2, $3, $4, $5, $6, false, $7, $8) RETURNING id, name, cro, email, clinic, specialty`,
+            [name, cro, email.toLowerCase(), senhaHash, clinic || '', specialty || '', token, expira]
         );
+
+        // Enviar email de confirmação
+        const linkConfirmacao = `${FRONTEND_URL}/area-dentistas/confirmar-email.html?token=${token}`;
+        const emailHtml = `
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+                <div style="text-align: center; margin-bottom: 30px;">
+                    <h1 style="color: #1FA2FF;">🦷 Dental Ultra</h1>
+                </div>
+                <h2 style="color: #333;">Bem-vindo(a) ao Dental Ultra!</h2>
+                <p>Olá <strong>${name}</strong>,</p>
+                <p>Obrigado por se cadastrar! Para ativar sua conta, clique no botão abaixo:</p>
+                <div style="text-align: center; margin: 30px 0;">
+                    <a href="${linkConfirmacao}" style="background: linear-gradient(135deg, #1FA2FF, #12D8FA); color: white; padding: 15px 40px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block;">
+                        ✅ Confirmar Email
+                    </a>
+                </div>
+                <p style="color: #666; font-size: 14px;">Este link expira em 24 horas.</p>
+                <p style="color: #666; font-size: 14px;">Se você não solicitou este cadastro, ignore este email.</p>
+                <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+                <p style="color: #999; font-size: 12px; text-align: center;">
+                    Dental Ultra - Sistema de Gestão Odontológica<br>
+                    suporte@dentalultra.com.br
+                </p>
+            </div>
+        `;
+        
+        const emailEnviado = await enviarEmail(email.toLowerCase(), '🦷 Confirme seu email - Dental Ultra', emailHtml);
 
         res.status(201).json({
             success: true,
-            message: 'Cadastro realizado com sucesso!',
-            dentista: { id: result.rows[0].id.toString(), nome: result.rows[0].name, email: result.rows[0].email }
+            message: emailEnviado 
+                ? 'Cadastro realizado! Verifique seu email para confirmar a conta.' 
+                : 'Cadastro realizado! Por favor, entre em contato com o suporte para ativar sua conta.',
+            aguardandoConfirmacao: true,
+            emailEnviado: emailEnviado
         });
     } catch (error) {
-        console.error('Erro registro:', error);
+        console.error('Erro registro:', error.message, error.stack);
+        res.status(500).json({ success: false, erro: 'Erro interno: ' + error.message });
+    }
+});
+
+// Rota para confirmar email
+app.get('/api/auth/confirmar-email', async (req, res) => {
+    try {
+        const { token } = req.query;
+        
+        if (!token) {
+            return res.status(400).json({ success: false, erro: 'Token não fornecido' });
+        }
+        
+        const result = await pool.query(
+            'SELECT id, name, email, token_expira FROM dentistas WHERE token_confirmacao = $1',
+            [token]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(400).json({ success: false, erro: 'Token inválido ou já utilizado' });
+        }
+        
+        const dentista = result.rows[0];
+        
+        // Verificar se expirou
+        if (new Date() > new Date(dentista.token_expira)) {
+            return res.status(400).json({ success: false, erro: 'Token expirado. Faça o cadastro novamente.' });
+        }
+        
+        // Confirmar email
+        await pool.query(
+            'UPDATE dentistas SET email_confirmado = true, token_confirmacao = NULL, token_expira = NULL WHERE id = $1',
+            [dentista.id]
+        );
+        
+        res.json({ 
+            success: true, 
+            message: 'Email confirmado com sucesso! Você já pode fazer login.',
+            nome: dentista.name
+        });
+    } catch (error) {
+        console.error('Erro confirmar email:', error);
+        res.status(500).json({ success: false, erro: 'Erro interno' });
+    }
+});
+
+// Rota para reenviar email de confirmação
+app.post('/api/auth/reenviar-confirmacao', async (req, res) => {
+    try {
+        const { email } = req.body;
+        
+        if (!email) {
+            return res.status(400).json({ success: false, erro: 'Email obrigatório' });
+        }
+        
+        const result = await pool.query(
+            'SELECT id, name, email_confirmado FROM dentistas WHERE email = $1',
+            [email.toLowerCase()]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(400).json({ success: false, erro: 'Email não encontrado' });
+        }
+        
+        if (result.rows[0].email_confirmado) {
+            return res.status(400).json({ success: false, erro: 'Email já confirmado. Faça login.' });
+        }
+        
+        const token = gerarToken();
+        const expira = new Date(Date.now() + 24 * 60 * 60 * 1000);
+        
+        await pool.query(
+            'UPDATE dentistas SET token_confirmacao = $1, token_expira = $2 WHERE id = $3',
+            [token, expira, result.rows[0].id]
+        );
+        
+        const linkConfirmacao = `${FRONTEND_URL}/area-dentistas/confirmar-email.html?token=${token}`;
+        const emailHtml = `
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+                <div style="text-align: center; margin-bottom: 30px;">
+                    <h1 style="color: #1FA2FF;">🦷 Dental Ultra</h1>
+                </div>
+                <h2 style="color: #333;">Confirme seu email</h2>
+                <p>Olá <strong>${result.rows[0].name}</strong>,</p>
+                <p>Clique no botão abaixo para confirmar seu email:</p>
+                <div style="text-align: center; margin: 30px 0;">
+                    <a href="${linkConfirmacao}" style="background: linear-gradient(135deg, #1FA2FF, #12D8FA); color: white; padding: 15px 40px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block;">
+                        ✅ Confirmar Email
+                    </a>
+                </div>
+                <p style="color: #666; font-size: 14px;">Este link expira em 24 horas.</p>
+                <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+                <p style="color: #999; font-size: 12px; text-align: center;">
+                    Dental Ultra - Sistema de Gestão Odontológica<br>
+                    suporte@dentalultra.com.br
+                </p>
+            </div>
+        `;
+        
+        await enviarEmail(email.toLowerCase(), '🦷 Confirme seu email - Dental Ultra', emailHtml);
+        
+        res.json({ success: true, message: 'Email de confirmação reenviado!' });
+    } catch (error) {
+        console.error('Erro reenviar confirmação:', error);
         res.status(500).json({ success: false, erro: 'Erro interno' });
     }
 });
@@ -572,46 +944,132 @@ app.post('/api/auth/login', async (req, res) => {
             return res.status(400).json({ success: false, erro: 'Email e senha obrigatórios' });
         }
 
-        const result = await pool.query('SELECT * FROM dentistas WHERE email = $1', [email.toLowerCase()]);
-        if (result.rows.length === 0) {
-            return res.status(401).json({ success: false, erro: 'Email ou senha incorretos' });
-        }
-
-        const dentista = result.rows[0];
+        const emailLower = email.toLowerCase();
         
-        if (!dentista.password) {
-            return res.status(401).json({ success: false, erro: 'Email ou senha incorretos' });
-        }
-        const senhaValida = await bcrypt.compare(password, dentista.password);
-        if (!senhaValida) {
-            return res.status(401).json({ success: false, erro: 'Email ou senha incorretos' });
-        }
-
-        // Verificar se conta está desativada
-        if (dentista.subscription_active === false) {
-            return res.status(403).json({ success: false, erro: 'Conta desativada' });
-        }
-
-        const token = jwt.sign(
-            { id: dentista.id.toString(), email: dentista.email, nome: dentista.name },
-            JWT_SECRET,
-            { expiresIn: '30d' }
-        );
-
-        res.json({
-            success: true,
-            message: 'Login realizado!',
-            token,
-            dentista: {
-                id: dentista.id.toString(),
-                nome: dentista.name,
-                cro: dentista.cro,
-                email: dentista.email,
-                clinica: dentista.clinic,
-                especialidade: dentista.specialty,
-                plano: dentista.subscription_plan || 'premium'
+        // 1. Primeiro tenta como dentista
+        const resultDentista = await pool.query('SELECT * FROM dentistas WHERE email = $1', [emailLower]);
+        
+        if (resultDentista.rows.length > 0) {
+            const dentista = resultDentista.rows[0];
+            
+            // Verificar se email foi confirmado
+            if (dentista.email_confirmado === false) {
+                return res.status(403).json({ 
+                    success: false, 
+                    erro: 'Email não confirmado. Verifique sua caixa de entrada.',
+                    emailNaoConfirmado: true,
+                    email: dentista.email
+                });
             }
-        });
+            
+            // Verificar senha
+            const senhaHash = dentista.senha || dentista.password;
+            if (!senhaHash) {
+                return res.status(401).json({ success: false, erro: 'Email ou senha incorretos' });
+            }
+            const senhaValida = await bcrypt.compare(password, senhaHash);
+            if (!senhaValida) {
+                return res.status(401).json({ success: false, erro: 'Email ou senha incorretos' });
+            }
+
+            // Verificar se conta está desativada
+            if (dentista.subscription_active === false || dentista.ativo === false) {
+                return res.status(403).json({ success: false, erro: 'Conta desativada' });
+            }
+
+            const nome = dentista.nome || dentista.name;
+
+            const token = jwt.sign(
+                { 
+                    id: dentista.id.toString(), 
+                    email: dentista.email, 
+                    nome: nome,
+                    tipo: 'dentista',
+                    permissoes: ['*']
+                },
+                JWT_SECRET,
+                { expiresIn: '30d' }
+            );
+
+            return res.json({
+                success: true,
+                message: 'Login realizado!',
+                token,
+                tipo: 'dentista',
+                dentista: {
+                    id: dentista.id.toString(),
+                    nome: nome,
+                    cro: dentista.cro,
+                    email: dentista.email,
+                    clinica: dentista.clinica || dentista.clinic,
+                    especialidade: dentista.especialidade || dentista.specialty,
+                    plano: dentista.subscription_plan || dentista.plano || 'premium'
+                }
+            });
+        }
+        
+        // 2. Se não encontrou como dentista, tenta como usuário vinculado
+        const resultUsuario = await pool.query(`
+            SELECT u.*, d.nome as dentista_nome, d.clinica, d.cro
+            FROM usuarios_vinculados u
+            JOIN dentistas d ON u.dentista_id = d.id
+            WHERE u.email = $1 AND u.ativo = true AND d.ativo = true
+        `, [emailLower]);
+        
+        if (resultUsuario.rows.length > 0) {
+            const usuario = resultUsuario.rows[0];
+            
+            // Verificar senha
+            const senhaValida = await bcrypt.compare(password, usuario.senha);
+            if (!senhaValida) {
+                return res.status(401).json({ success: false, erro: 'Email ou senha incorretos' });
+            }
+            
+            // Parse permissões
+            let permissoes = [];
+            try {
+                permissoes = typeof usuario.permissoes === 'string' 
+                    ? JSON.parse(usuario.permissoes) 
+                    : usuario.permissoes || [];
+            } catch (e) {
+                permissoes = [];
+            }
+
+            const token = jwt.sign(
+                { 
+                    id: usuario.id.toString(),
+                    dentista_id: usuario.dentista_id.toString(),
+                    email: usuario.email, 
+                    nome: usuario.nome,
+                    tipo: 'usuario',
+                    cargo: usuario.cargo,
+                    permissoes: permissoes
+                },
+                JWT_SECRET,
+                { expiresIn: '30d' }
+            );
+
+            return res.json({
+                success: true,
+                message: 'Login realizado!',
+                token,
+                tipo: 'usuario',
+                usuario: {
+                    id: usuario.id.toString(),
+                    nome: usuario.nome,
+                    email: usuario.email,
+                    cargo: usuario.cargo,
+                    permissoes: permissoes,
+                    dentista_id: usuario.dentista_id.toString(),
+                    dentista_nome: usuario.dentista_nome,
+                    clinica: usuario.clinica
+                }
+            });
+        }
+        
+        // Não encontrou em nenhuma tabela
+        return res.status(401).json({ success: false, erro: 'Email ou senha incorretos' });
+
     } catch (error) {
         console.error('Erro login:', error);
         res.status(500).json({ success: false, erro: 'Erro interno' });
@@ -1107,6 +1565,255 @@ app.put('/api/config-clinica', authMiddleware, async (req, res) => {
     } catch (error) {
         console.error('Erro salvar config:', error);
         res.status(500).json({ success: false, erro: 'Erro ao salvar configurações' });
+    }
+});
+
+// ==============================================================================
+// ROTAS DE USUÁRIOS VINCULADOS (Secretárias, Auxiliares, etc)
+// ==============================================================================
+
+// Lista de permissões disponíveis
+const PERMISSOES_DISPONIVEIS = [
+    { id: 'agenda', nome: 'Agenda', descricao: 'Visualizar e gerenciar agendamentos' },
+    { id: 'agenda_editar', nome: 'Agenda - Editar', descricao: 'Criar, editar e excluir agendamentos' },
+    { id: 'pacientes_visualizar', nome: 'Pacientes - Visualizar', descricao: 'Ver lista e dados básicos de pacientes' },
+    { id: 'pacientes_editar', nome: 'Pacientes - Editar', descricao: 'Cadastrar e editar pacientes' },
+    { id: 'prontuario', nome: 'Prontuário', descricao: 'Acessar prontuários e anamnese' },
+    { id: 'odontograma', nome: 'Odontograma', descricao: 'Visualizar e editar odontograma' },
+    { id: 'plano_tratamento', nome: 'Plano de Tratamento', descricao: 'Criar e editar planos de tratamento' },
+    { id: 'financeiro_visualizar', nome: 'Financeiro - Visualizar', descricao: 'Ver recebimentos e pagamentos' },
+    { id: 'financeiro_editar', nome: 'Financeiro - Editar', descricao: 'Registrar recebimentos e pagamentos' },
+    { id: 'laboratorio', nome: 'Laboratório', descricao: 'Gerenciar casos protéticos' },
+    { id: 'nfse', nome: 'Notas Fiscais', descricao: 'Emitir e gerenciar NFS-e' },
+    { id: 'relatorios', nome: 'Relatórios', descricao: 'Acessar relatórios e dashboard' },
+    { id: 'configuracoes', nome: 'Configurações', descricao: 'Alterar configurações do sistema' },
+    { id: 'usuarios', nome: 'Gerenciar Usuários', descricao: 'Criar e gerenciar usuários vinculados' }
+];
+
+// Listar permissões disponíveis
+app.get('/api/usuarios/permissoes-disponiveis', authMiddleware, (req, res) => {
+    res.json({ success: true, permissoes: PERMISSOES_DISPONIVEIS });
+});
+
+// Listar usuários vinculados do dentista
+app.get('/api/usuarios', authMiddleware, async (req, res) => {
+    try {
+        // Apenas dentistas podem ver usuários
+        if (req.tipoUsuario !== 'dentista') {
+            return res.status(403).json({ success: false, erro: 'Apenas o dentista pode gerenciar usuários' });
+        }
+        
+        const dentistaId = req.user.id;
+        
+        const result = await pool.query(`
+            SELECT id, nome, email, cargo, ativo, permissoes, criado_em, atualizado_em
+            FROM usuarios_vinculados
+            WHERE dentista_id = $1
+            ORDER BY nome
+        `, [dentistaId]);
+        
+        // Parse permissões
+        const usuarios = result.rows.map(u => ({
+            ...u,
+            permissoes: typeof u.permissoes === 'string' ? JSON.parse(u.permissoes) : u.permissoes
+        }));
+        
+        res.json({ success: true, usuarios });
+    } catch (error) {
+        console.error('Erro listar usuarios:', error);
+        res.status(500).json({ success: false, erro: 'Erro ao listar usuários' });
+    }
+});
+
+// Criar novo usuário vinculado
+app.post('/api/usuarios', authMiddleware, async (req, res) => {
+    try {
+        // Apenas dentistas podem criar usuários
+        if (req.tipoUsuario !== 'dentista') {
+            return res.status(403).json({ success: false, erro: 'Apenas o dentista pode criar usuários' });
+        }
+        
+        const dentistaId = req.user.id;
+        const { nome, email, senha, cargo, permissoes } = req.body;
+        
+        // Validações
+        if (!nome || !email || !senha) {
+            return res.status(400).json({ success: false, erro: 'Nome, email e senha são obrigatórios' });
+        }
+        
+        if (senha.length < 6) {
+            return res.status(400).json({ success: false, erro: 'Senha deve ter no mínimo 6 caracteres' });
+        }
+        
+        const emailLower = email.toLowerCase();
+        
+        // Verificar se email já existe (como dentista ou usuário)
+        const existeDentista = await pool.query('SELECT id FROM dentistas WHERE email = $1', [emailLower]);
+        if (existeDentista.rows.length > 0) {
+            return res.status(400).json({ success: false, erro: 'Este email já está em uso' });
+        }
+        
+        const existeUsuario = await pool.query(
+            'SELECT id FROM usuarios_vinculados WHERE email = $1',
+            [emailLower]
+        );
+        if (existeUsuario.rows.length > 0) {
+            return res.status(400).json({ success: false, erro: 'Este email já está em uso' });
+        }
+        
+        // Hash da senha
+        const senhaHash = await bcrypt.hash(senha, 10);
+        
+        // Permissões padrão se não informadas
+        const permsArray = permissoes || ['agenda', 'pacientes_visualizar'];
+        
+        const result = await pool.query(`
+            INSERT INTO usuarios_vinculados (dentista_id, nome, email, senha, cargo, permissoes)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            RETURNING id, nome, email, cargo, ativo, permissoes, criado_em
+        `, [dentistaId, nome, emailLower, senhaHash, cargo || 'Secretária', JSON.stringify(permsArray)]);
+        
+        const usuario = result.rows[0];
+        usuario.permissoes = permsArray;
+        
+        res.json({ success: true, message: 'Usuário criado com sucesso!', usuario });
+    } catch (error) {
+        console.error('Erro criar usuario:', error);
+        if (error.code === '23505') {
+            return res.status(400).json({ success: false, erro: 'Este email já está em uso' });
+        }
+        res.status(500).json({ success: false, erro: 'Erro ao criar usuário' });
+    }
+});
+
+// Atualizar usuário vinculado
+app.put('/api/usuarios/:id', authMiddleware, async (req, res) => {
+    try {
+        // Apenas dentistas podem editar usuários
+        if (req.tipoUsuario !== 'dentista') {
+            return res.status(403).json({ success: false, erro: 'Apenas o dentista pode editar usuários' });
+        }
+        
+        const dentistaId = req.user.id;
+        const usuarioId = validarId(req.params.id);
+        
+        if (!usuarioId) {
+            return res.status(400).json({ success: false, erro: 'ID inválido' });
+        }
+        
+        const { nome, email, senha, cargo, permissoes, ativo } = req.body;
+        
+        // Verificar se usuário pertence ao dentista
+        const existe = await pool.query(
+            'SELECT id FROM usuarios_vinculados WHERE id = $1 AND dentista_id = $2',
+            [usuarioId, dentistaId]
+        );
+        if (existe.rows.length === 0) {
+            return res.status(404).json({ success: false, erro: 'Usuário não encontrado' });
+        }
+        
+        // Montar query dinâmica
+        const campos = [];
+        const valores = [];
+        let idx = 1;
+        
+        if (nome) {
+            campos.push(`nome = $${idx++}`);
+            valores.push(nome);
+        }
+        if (email) {
+            // Verificar se novo email já existe
+            const emailLower = email.toLowerCase();
+            const existeEmail = await pool.query(
+                'SELECT id FROM usuarios_vinculados WHERE email = $1 AND id != $2',
+                [emailLower, usuarioId]
+            );
+            if (existeEmail.rows.length > 0) {
+                return res.status(400).json({ success: false, erro: 'Este email já está em uso' });
+            }
+            const existeDentista = await pool.query('SELECT id FROM dentistas WHERE email = $1', [emailLower]);
+            if (existeDentista.rows.length > 0) {
+                return res.status(400).json({ success: false, erro: 'Este email já está em uso' });
+            }
+            campos.push(`email = $${idx++}`);
+            valores.push(emailLower);
+        }
+        if (senha) {
+            if (senha.length < 6) {
+                return res.status(400).json({ success: false, erro: 'Senha deve ter no mínimo 6 caracteres' });
+            }
+            const senhaHash = await bcrypt.hash(senha, 10);
+            campos.push(`senha = $${idx++}`);
+            valores.push(senhaHash);
+        }
+        if (cargo !== undefined) {
+            campos.push(`cargo = $${idx++}`);
+            valores.push(cargo);
+        }
+        if (permissoes !== undefined) {
+            campos.push(`permissoes = $${idx++}`);
+            valores.push(JSON.stringify(permissoes));
+        }
+        if (ativo !== undefined) {
+            campos.push(`ativo = $${idx++}`);
+            valores.push(ativo);
+        }
+        
+        if (campos.length === 0) {
+            return res.status(400).json({ success: false, erro: 'Nenhum campo para atualizar' });
+        }
+        
+        campos.push(`atualizado_em = CURRENT_TIMESTAMP`);
+        valores.push(usuarioId);
+        
+        const query = `
+            UPDATE usuarios_vinculados 
+            SET ${campos.join(', ')}
+            WHERE id = $${idx}
+            RETURNING id, nome, email, cargo, ativo, permissoes, criado_em, atualizado_em
+        `;
+        
+        const result = await pool.query(query, valores);
+        const usuario = result.rows[0];
+        usuario.permissoes = typeof usuario.permissoes === 'string' 
+            ? JSON.parse(usuario.permissoes) 
+            : usuario.permissoes;
+        
+        res.json({ success: true, message: 'Usuário atualizado!', usuario });
+    } catch (error) {
+        console.error('Erro atualizar usuario:', error);
+        res.status(500).json({ success: false, erro: 'Erro ao atualizar usuário' });
+    }
+});
+
+// Excluir usuário vinculado
+app.delete('/api/usuarios/:id', authMiddleware, async (req, res) => {
+    try {
+        // Apenas dentistas podem excluir usuários
+        if (req.tipoUsuario !== 'dentista') {
+            return res.status(403).json({ success: false, erro: 'Apenas o dentista pode excluir usuários' });
+        }
+        
+        const dentistaId = req.user.id;
+        const usuarioId = validarId(req.params.id);
+        
+        if (!usuarioId) {
+            return res.status(400).json({ success: false, erro: 'ID inválido' });
+        }
+        
+        const result = await pool.query(
+            'DELETE FROM usuarios_vinculados WHERE id = $1 AND dentista_id = $2 RETURNING id, nome',
+            [usuarioId, dentistaId]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ success: false, erro: 'Usuário não encontrado' });
+        }
+        
+        res.json({ success: true, message: `Usuário ${result.rows[0].nome} excluído!` });
+    } catch (error) {
+        console.error('Erro excluir usuario:', error);
+        res.status(500).json({ success: false, erro: 'Erro ao excluir usuário' });
     }
 });
 
@@ -1660,34 +2367,38 @@ app.post('/api/agendamentos/confirmar', async (req, res) => {
 app.get('/api/agendamentos', authMiddleware, async (req, res) => {
     try {
         const { data, inicio, fim, profissional_id } = req.query;
-        let query = 'SELECT * FROM agendamentos WHERE dentista_id = $1';
+        let query = `SELECT a.*, COALESCE(p.celular, p.telefone) as paciente_telefone 
+                     FROM agendamentos a 
+                     LEFT JOIN pacientes p ON a.paciente_id = p.id 
+                     WHERE a.dentista_id = $1`;
         const params = [parseInt(req.user.id)];
         let paramIndex = 2;
 
         // Filtrar por profissional específico (coluna da agenda)
         if (profissional_id) {
-            query += ` AND profissional_id = $${paramIndex}`;
+            query += ` AND a.profissional_id = $${paramIndex}`;
             params.push(parseInt(profissional_id));
             paramIndex++;
         }
 
         if (data) {
-            query += ` AND data = $${paramIndex}`;
+            query += ` AND a.data = $${paramIndex}`;
             params.push(data);
             paramIndex++;
         } else if (inicio && fim) {
-            query += ` AND data >= $${paramIndex} AND data <= $${paramIndex + 1}`;
+            query += ` AND a.data >= $${paramIndex} AND a.data <= $${paramIndex + 1}`;
             params.push(inicio, fim);
             paramIndex += 2;
         }
 
-        query += ' ORDER BY data ASC, horario ASC';
+        query += ' ORDER BY a.data ASC, a.horario ASC';
         const result = await pool.query(query, params);
 
         const agendamentos = result.rows.map(a => ({
             id: a.id.toString(),
             pacienteId: a.paciente_id ? a.paciente_id.toString() : null,
             paciente_nome: a.paciente_nome,
+            paciente_telefone: a.paciente_telefone || null,
             data: a.data,
             hora: a.horario,
             duracao: a.duracao,
@@ -1721,7 +2432,7 @@ app.get('/api/agendamentos/pendentes', authMiddleware, async (req, res) => {
         // Buscar agendamentos pendentes (status = 'agendado') com dados do paciente e profissional
         const result = await pool.query(
             `SELECT a.*, 
-                    p.celular as paciente_telefone,
+                    COALESCE(p.celular, p.telefone) as paciente_telefone,
                     prof.nome as profissional_nome
              FROM agendamentos a
              LEFT JOIN pacientes p ON a.paciente_id = p.id
@@ -1859,7 +2570,7 @@ app.get('/api/agendamentos/:id', authMiddleware, async (req, res) => {
         }
         
         const result = await pool.query(
-            `SELECT a.*, p.celular as paciente_telefone_db
+            `SELECT a.*, COALESCE(p.celular, p.telefone) as paciente_telefone_db
              FROM agendamentos a
              LEFT JOIN pacientes p ON a.paciente_id = p.id
              WHERE a.id = $1 AND a.dentista_id = $2`,
@@ -2632,12 +3343,33 @@ app.get('/api/financas', authMiddleware, async (req, res) => {
 // Função para gerar código do caso
 async function gerarCodigoCaso(dentistaId) {
     const ano = new Date().getFullYear();
-    const result = await pool.query(
-        `SELECT COUNT(*) + 1 as seq FROM casos_proteticos WHERE dentista_id = $1 AND codigo LIKE $2`,
-        [dentistaId, `CP-${ano}-%`]
-    );
-    const seq = result.rows[0].seq;
-    return `CP-${ano}-${String(seq).padStart(4, '0')}`;
+    
+    // Gerar código aleatório (6 caracteres alfanuméricos)
+    function gerarAleatorio() {
+        const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // Sem I, O, 0, 1 para evitar confusão
+        let codigo = '';
+        for (let i = 0; i < 6; i++) {
+            codigo += chars.charAt(Math.floor(Math.random() * chars.length));
+        }
+        return `CP-${ano}-${codigo}`;
+    }
+    
+    // Tentar gerar código único
+    let tentativas = 0;
+    while (tentativas < 10) {
+        const codigo = gerarAleatorio();
+        const existe = await pool.query(
+            'SELECT id FROM casos_proteticos WHERE codigo = $1',
+            [codigo]
+        );
+        if (existe.rows.length === 0) {
+            return codigo;
+        }
+        tentativas++;
+    }
+    
+    // Fallback extremo: usar timestamp
+    return `CP-${ano}-${Date.now()}`;
 }
 
 // Listar casos
@@ -2740,7 +3472,7 @@ app.get('/api/casos-proteticos/:id', authMiddleware, async (req, res) => {
         const { id } = req.params;
 
         const casoResult = await pool.query(`
-            SELECT cp.*, p.nome as paciente_nome, p.telefone as paciente_telefone,
+            SELECT cp.*, p.nome as paciente_nome, COALESCE(p.celular, p.telefone) as paciente_telefone,
                 l.nome as laboratorio_nome, l.telefone as laboratorio_telefone, l.whatsapp as laboratorio_whatsapp
             FROM casos_proteticos cp
             LEFT JOIN pacientes p ON p.id = cp.paciente_id
@@ -3045,6 +3777,473 @@ app.post('/api/casos-proteticos/:id/mensagens', authMiddleware, async (req, res)
     } catch (error) {
         console.error('Erro ao enviar mensagem:', error);
         res.status(500).json({ success: false, erro: 'Erro ao enviar mensagem' });
+    }
+});
+
+// ==============================================================================
+// ROTAS PREFEITURAS NFS-e
+// ==============================================================================
+
+// Templates de prefeituras pré-cadastradas (dados técnicos já configurados)
+const TEMPLATES_PREFEITURAS = [
+    {
+        id: 'pomerode-sc',
+        cidade: 'Pomerode',
+        uf: 'SC',
+        codigo_tom: '8273',
+        sistema: 'ipm',
+        url_webservice: 'https://ws-pomerode.atende.net:7443/?pg=rest&service=WNERestServiceNFSe',
+        serie_nfse: '1',
+        ambiente: 'producao',
+        aliquota_iss: 3.00,
+        codigo_servico: '8630504',
+        item_lista_servico: '4.11',
+        codigo_nbs: '1.1101.30.00',
+        situacao_tributaria: '1',
+        cst_ibs_cbs: '200',
+        class_trib: '200028',
+        fin_nfse: '0',
+        ind_final: '1',
+        c_ind_op: '030102',
+        aliquota_ibs_uf: 0.1,
+        aliquota_ibs_mun: 0,
+        aliquota_cbs: 0.9,
+        tipo_retencao: '2',
+        aliquota_pis: 0.65,
+        aliquota_cofins: 3.00
+    },
+    {
+        id: 'sao-paulo-sp',
+        cidade: 'São Paulo',
+        uf: 'SP',
+        codigo_tom: '7107',
+        sistema: 'nfpaulistana',
+        url_webservice: 'https://nfe.prefeitura.sp.gov.br/ws/lotenfe.asmx',
+        serie_nfse: 'RPS',
+        ambiente: 'producao',
+        aliquota_iss: 5.00,
+        codigo_servico: '05762',
+        item_lista_servico: '4.11',
+        codigo_nbs: '1.1101.30.00',
+        situacao_tributaria: '1',
+        cst_ibs_cbs: '200',
+        class_trib: '200028',
+        fin_nfse: '0',
+        ind_final: '1',
+        c_ind_op: '030102',
+        aliquota_ibs_uf: 0.1,
+        aliquota_ibs_mun: 0,
+        aliquota_cbs: 0.9,
+        tipo_retencao: '2',
+        aliquota_pis: 0.65,
+        aliquota_cofins: 3.00
+    },
+    {
+        id: 'blumenau-sc',
+        cidade: 'Blumenau',
+        uf: 'SC',
+        codigo_tom: '8059',
+        sistema: 'ipm',
+        url_webservice: 'https://ws-blumenau.atende.net:7443/?pg=rest&service=WNERestServiceNFSe',
+        serie_nfse: '1',
+        ambiente: 'producao',
+        aliquota_iss: 3.00,
+        codigo_servico: '8630504',
+        item_lista_servico: '4.11',
+        codigo_nbs: '1.1101.30.00',
+        situacao_tributaria: '1',
+        cst_ibs_cbs: '200',
+        class_trib: '200028',
+        fin_nfse: '0',
+        ind_final: '1',
+        c_ind_op: '030102',
+        aliquota_ibs_uf: 0.1,
+        aliquota_ibs_mun: 0,
+        aliquota_cbs: 0.9,
+        tipo_retencao: '2',
+        aliquota_pis: 0.65,
+        aliquota_cofins: 3.00
+    },
+    {
+        id: 'joinville-sc',
+        cidade: 'Joinville',
+        uf: 'SC',
+        codigo_tom: '8179',
+        sistema: 'ipm',
+        url_webservice: 'https://ws-joinville.atende.net:7443/?pg=rest&service=WNERestServiceNFSe',
+        serie_nfse: '1',
+        ambiente: 'producao',
+        aliquota_iss: 3.00,
+        codigo_servico: '8630504',
+        item_lista_servico: '4.11',
+        codigo_nbs: '1.1101.30.00',
+        situacao_tributaria: '1',
+        cst_ibs_cbs: '200',
+        class_trib: '200028',
+        fin_nfse: '0',
+        ind_final: '1',
+        c_ind_op: '030102',
+        aliquota_ibs_uf: 0.1,
+        aliquota_ibs_mun: 0,
+        aliquota_cbs: 0.9,
+        tipo_retencao: '2',
+        aliquota_pis: 0.65,
+        aliquota_cofins: 3.00
+    },
+    {
+        id: 'florianopolis-sc',
+        cidade: 'Florianópolis',
+        uf: 'SC',
+        codigo_tom: '8105',
+        sistema: 'betha',
+        url_webservice: 'https://e-gov.betha.com.br/e-nota-contribuinte-ws/nfseWS',
+        serie_nfse: '1',
+        ambiente: 'producao',
+        aliquota_iss: 3.00,
+        codigo_servico: '8630504',
+        item_lista_servico: '4.11',
+        codigo_nbs: '1.1101.30.00',
+        situacao_tributaria: '1',
+        cst_ibs_cbs: '200',
+        class_trib: '200028',
+        fin_nfse: '0',
+        ind_final: '1',
+        c_ind_op: '030102',
+        aliquota_ibs_uf: 0.1,
+        aliquota_ibs_mun: 0,
+        aliquota_cbs: 0.9,
+        tipo_retencao: '2',
+        aliquota_pis: 0.65,
+        aliquota_cofins: 3.00
+    },
+    {
+        id: 'curitiba-pr',
+        cidade: 'Curitiba',
+        uf: 'PR',
+        codigo_tom: '7535',
+        sistema: 'curitiba',
+        url_webservice: 'https://isscuritiba.curitiba.pr.gov.br/Iss.NfseWebService/nfsews.asmx',
+        serie_nfse: '1',
+        ambiente: 'producao',
+        aliquota_iss: 5.00,
+        codigo_servico: '4110',
+        item_lista_servico: '4.11',
+        codigo_nbs: '1.1101.30.00',
+        situacao_tributaria: '1',
+        cst_ibs_cbs: '200',
+        class_trib: '200028',
+        fin_nfse: '0',
+        ind_final: '1',
+        c_ind_op: '030102',
+        aliquota_ibs_uf: 0.1,
+        aliquota_ibs_mun: 0,
+        aliquota_cbs: 0.9,
+        tipo_retencao: '2',
+        aliquota_pis: 0.65,
+        aliquota_cofins: 3.00
+    }
+];
+
+// GET - Listar templates de prefeituras disponíveis
+app.get('/api/prefeituras/templates', (req, res) => {
+    res.json({
+        success: true,
+        templates: TEMPLATES_PREFEITURAS.map(t => ({
+            id: t.id,
+            cidade: t.cidade,
+            uf: t.uf,
+            sistema: t.sistema
+        }))
+    });
+});
+
+// GET - Obter template completo por ID
+app.get('/api/prefeituras/templates/:id', (req, res) => {
+    const template = TEMPLATES_PREFEITURAS.find(t => t.id === req.params.id);
+    if (!template) {
+        return res.status(404).json({ success: false, erro: 'Template não encontrado' });
+    }
+    res.json({ success: true, template });
+});
+
+// GET - Listar prefeituras configuradas do dentista
+app.get('/api/prefeituras', authMiddleware, async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT id, cidade, uf, codigo_tom, sistema, url_webservice, cpf_cnpj_prestador,
+                   serie_nfse, ambiente, exige_certificado, aliquota_iss, codigo_servico,
+                   item_lista_servico, codigo_nbs, situacao_tributaria, cst_ibs_cbs,
+                   class_trib, fin_nfse, ind_final, c_ind_op, aliquota_ibs_uf,
+                   aliquota_ibs_mun, aliquota_cbs, reducao_aliquota, redutor_gov,
+                   tipo_retencao, aliquota_pis, aliquota_cofins, ativo, criado_em
+            FROM config_prefeituras 
+            WHERE dentista_id = $1 
+            ORDER BY cidade
+        `, [req.dentistaId]);
+        
+        res.json({ success: true, prefeituras: result.rows });
+    } catch (error) {
+        console.error('Erro ao listar prefeituras:', error);
+        res.status(500).json({ success: false, erro: error.message });
+    }
+});
+
+// GET - Obter prefeitura específica
+app.get('/api/prefeituras/:id', authMiddleware, async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT * FROM config_prefeituras 
+            WHERE id = $1 AND dentista_id = $2
+        `, [req.params.id, req.dentistaId]);
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ success: false, erro: 'Prefeitura não encontrada' });
+        }
+        
+        res.json({ success: true, prefeitura: result.rows[0] });
+    } catch (error) {
+        console.error('Erro ao obter prefeitura:', error);
+        res.status(500).json({ success: false, erro: error.message });
+    }
+});
+
+// POST - Salvar nova prefeitura
+app.post('/api/prefeituras', authMiddleware, async (req, res) => {
+    try {
+        const {
+            cidade, uf, codigo_tom, sistema, url_webservice, cpf_cnpj_prestador,
+            senha_webservice, serie_nfse, ambiente, exige_certificado,
+            aliquota_iss, codigo_servico, item_lista_servico, codigo_trib_nacional, codigo_nbs,
+            situacao_tributaria, cst_ibs_cbs, class_trib, fin_nfse, ind_final,
+            c_ind_op, aliquota_ibs_uf, aliquota_ibs_mun, aliquota_cbs,
+            reducao_aliquota, redutor_gov, tipo_retencao, aliquota_pis, aliquota_cofins
+        } = req.body;
+        
+        if (!cidade || !uf || !url_webservice) {
+            return res.status(400).json({ success: false, erro: 'Cidade, UF e URL são obrigatórios' });
+        }
+        
+        const result = await pool.query(`
+            INSERT INTO config_prefeituras (
+                dentista_id, cidade, uf, codigo_tom, sistema, url_webservice,
+                cpf_cnpj_prestador, senha_webservice, serie_nfse, ambiente, exige_certificado,
+                aliquota_iss, codigo_servico, item_lista_servico, codigo_trib_nacional, codigo_nbs,
+                situacao_tributaria, cst_ibs_cbs, class_trib, fin_nfse, ind_final,
+                c_ind_op, aliquota_ibs_uf, aliquota_ibs_mun, aliquota_cbs,
+                reducao_aliquota, redutor_gov, tipo_retencao, aliquota_pis, aliquota_cofins
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30)
+            RETURNING id
+        `, [
+            req.dentistaId, cidade, uf, codigo_tom, sistema || 'ipm', url_webservice,
+            cpf_cnpj_prestador, senha_webservice, serie_nfse || '1', ambiente || 'producao',
+            exige_certificado || false, aliquota_iss, codigo_servico, item_lista_servico,
+            codigo_trib_nacional || '041201', codigo_nbs, situacao_tributaria, cst_ibs_cbs, class_trib, fin_nfse, ind_final,
+            c_ind_op, aliquota_ibs_uf, aliquota_ibs_mun, aliquota_cbs,
+            reducao_aliquota, redutor_gov, tipo_retencao, aliquota_pis, aliquota_cofins
+        ]);
+        
+        res.json({ success: true, id: result.rows[0].id, mensagem: 'Prefeitura salva com sucesso!' });
+    } catch (error) {
+        console.error('Erro ao salvar prefeitura:', error);
+        res.status(500).json({ success: false, erro: error.message });
+    }
+});
+
+// PUT - Atualizar prefeitura
+app.put('/api/prefeituras/:id', authMiddleware, async (req, res) => {
+    try {
+        const {
+            cidade, uf, codigo_tom, sistema, url_webservice, cpf_cnpj_prestador,
+            senha_webservice, serie_nfse, ambiente, exige_certificado,
+            aliquota_iss, codigo_servico, item_lista_servico, codigo_trib_nacional, codigo_nbs,
+            situacao_tributaria, cst_ibs_cbs, class_trib, fin_nfse, ind_final,
+            c_ind_op, aliquota_ibs_uf, aliquota_ibs_mun, aliquota_cbs,
+            reducao_aliquota, redutor_gov, tipo_retencao, aliquota_pis, aliquota_cofins
+        } = req.body;
+        
+        // Monta query dinâmica (não atualiza senha se não foi enviada)
+        let query = `
+            UPDATE config_prefeituras SET
+                cidade = $1, uf = $2, codigo_tom = $3, sistema = $4, url_webservice = $5,
+                cpf_cnpj_prestador = $6, serie_nfse = $7, ambiente = $8, exige_certificado = $9,
+                aliquota_iss = $10, codigo_servico = $11, item_lista_servico = $12, 
+                codigo_trib_nacional = $13, codigo_nbs = $14,
+                situacao_tributaria = $15, cst_ibs_cbs = $16, class_trib = $17, fin_nfse = $18,
+                ind_final = $19, c_ind_op = $20, aliquota_ibs_uf = $21, aliquota_ibs_mun = $22,
+                aliquota_cbs = $23, reducao_aliquota = $24, redutor_gov = $25, tipo_retencao = $26,
+                aliquota_pis = $27, aliquota_cofins = $28, atualizado_em = CURRENT_TIMESTAMP
+        `;
+        
+        let params = [
+            cidade, uf, codigo_tom, sistema, url_webservice, cpf_cnpj_prestador,
+            serie_nfse, ambiente, exige_certificado, aliquota_iss, codigo_servico,
+            item_lista_servico, codigo_trib_nacional || '041201', codigo_nbs, 
+            situacao_tributaria, cst_ibs_cbs, class_trib,
+            fin_nfse, ind_final, c_ind_op, aliquota_ibs_uf, aliquota_ibs_mun, aliquota_cbs,
+            reducao_aliquota, redutor_gov, tipo_retencao, aliquota_pis, aliquota_cofins
+        ];
+        
+        // Se senha foi enviada, atualiza também
+        if (senha_webservice) {
+            query += `, senha_webservice = $29 WHERE id = $30 AND dentista_id = $31`;
+            params.push(senha_webservice, req.params.id, req.dentistaId);
+        } else {
+            query += ` WHERE id = $29 AND dentista_id = $30`;
+            params.push(req.params.id, req.dentistaId);
+        }
+        
+        const result = await pool.query(query, params);
+        
+        if (result.rowCount === 0) {
+            return res.status(404).json({ success: false, erro: 'Prefeitura não encontrada' });
+        }
+        
+        res.json({ success: true, mensagem: 'Prefeitura atualizada!' });
+    } catch (error) {
+        console.error('Erro ao atualizar prefeitura:', error);
+        res.status(500).json({ success: false, erro: error.message });
+    }
+});
+
+// DELETE - Excluir prefeitura
+app.delete('/api/prefeituras/:id', authMiddleware, async (req, res) => {
+    try {
+        const result = await pool.query(`
+            DELETE FROM config_prefeituras WHERE id = $1 AND dentista_id = $2
+        `, [req.params.id, req.dentistaId]);
+        
+        if (result.rowCount === 0) {
+            return res.status(404).json({ success: false, erro: 'Prefeitura não encontrada' });
+        }
+        
+        res.json({ success: true, mensagem: 'Prefeitura excluída!' });
+    } catch (error) {
+        console.error('Erro ao excluir prefeitura:', error);
+        res.status(500).json({ success: false, erro: error.message });
+    }
+});
+
+// ==============================================================================
+// TESTE DE CONEXÃO NFS-e (IPM/Atende.Net)
+// ==============================================================================
+
+app.post('/api/nfse/testar-conexao', authMiddleware, async (req, res) => {
+    const { url_webservice, cpf_cnpj_prestador, senha_webservice } = req.body;
+    
+    if (!url_webservice || !cpf_cnpj_prestador || !senha_webservice) {
+        return res.status(400).json({ 
+            sucesso: false, 
+            erro: 'URL, CPF/CNPJ e Senha são obrigatórios' 
+        });
+    }
+    
+    console.log('🔌 Testando conexão NFS-e:', url_webservice);
+    
+    try {
+        // Para IPM/Atende.Net, fazemos uma consulta simples de verificação
+        const xmlBody = `<?xml version="1.0" encoding="UTF-8"?>
+<ConsultarNfseRpsEnvio xmlns="http://www.abrasf.org.br/nfse.xsd">
+    <IdentificacaoRps>
+        <Numero>0</Numero>
+        <Serie>TESTE</Serie>
+        <Tipo>1</Tipo>
+    </IdentificacaoRps>
+    <Prestador>
+        <CpfCnpj>
+            ${cpf_cnpj_prestador.length === 11 ? `<Cpf>${cpf_cnpj_prestador}</Cpf>` : `<Cnpj>${cpf_cnpj_prestador}</Cnpj>`}
+        </CpfCnpj>
+    </Prestador>
+</ConsultarNfseRpsEnvio>`;
+        
+        // Determinar se é sistema IPM pelo URL
+        const isIPM = url_webservice.includes('atende.net');
+        
+        if (isIPM) {
+            // IPM usa REST com autenticação via headers
+            const response = await axios.post(url_webservice, xmlBody, {
+                headers: {
+                    'Content-Type': 'application/xml',
+                    'usuario': cpf_cnpj_prestador,
+                    'senha': senha_webservice
+                },
+                timeout: 15000,
+                validateStatus: () => true // Aceita qualquer status para analisar a resposta
+            });
+            
+            const responseText = typeof response.data === 'string' ? response.data : JSON.stringify(response.data);
+            console.log('📩 Resposta IPM:', responseText.substring(0, 500));
+            
+            // Se recebeu resposta XML, conexão está ok (mesmo que seja erro de "RPS não encontrado")
+            if (responseText.includes('<?xml') || responseText.includes('<')) {
+                // Verificar se é erro de autenticação
+                if (responseText.includes('Acesso negado') || responseText.includes('não autorizado') || responseText.includes('Unauthorized') || response.status === 401) {
+                    return res.json({
+                        sucesso: false,
+                        erro: 'Credenciais inválidas. Verifique CPF/CNPJ e senha.',
+                        detalhes: responseText.substring(0, 200)
+                    });
+                }
+                
+                // Conexão OK - pode ser "RPS não encontrado" mas isso é esperado
+                return res.json({
+                    sucesso: true,
+                    mensagem: 'Conexão estabelecida com sucesso!',
+                    prestador: cpf_cnpj_prestador,
+                    servidor: 'IPM/Atende.Net',
+                    resposta: responseText.substring(0, 200)
+                });
+            } else {
+                return res.json({
+                    sucesso: false,
+                    erro: 'Resposta inesperada do servidor',
+                    detalhes: responseText.substring(0, 200)
+                });
+            }
+        } else {
+            // Para outros sistemas (Betha, etc), fazemos um teste básico
+            const response = await axios.get(url_webservice, {
+                timeout: 10000,
+                validateStatus: () => true
+            });
+            
+            if (response.status === 200 || response.status === 405) {
+                // 405 = Method Not Allowed é esperado para webservices SOAP
+                return res.json({
+                    sucesso: true,
+                    mensagem: 'Servidor acessível! Configure os demais parâmetros conforme documentação.',
+                    prestador: cpf_cnpj_prestador,
+                    servidor: 'Detectado'
+                });
+            } else {
+                const responseText = typeof response.data === 'string' ? response.data : '';
+                return res.json({
+                    sucesso: false,
+                    erro: `Servidor retornou status ${response.status}`,
+                    detalhes: responseText.substring(0, 200)
+                });
+            }
+        }
+        
+    } catch (error) {
+        console.error('❌ Erro no teste de conexão:', error.message);
+        
+        let mensagemErro = 'Não foi possível conectar ao servidor.';
+        
+        if (error.code === 'ENOTFOUND') {
+            mensagemErro = 'URL do servidor não encontrada. Verifique o endereço.';
+        } else if (error.code === 'ECONNREFUSED') {
+            mensagemErro = 'Conexão recusada pelo servidor.';
+        } else if (error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED') {
+            mensagemErro = 'Tempo limite excedido. Servidor não respondeu.';
+        } else if (error.message) {
+            mensagemErro = error.message;
+        }
+        
+        res.status(500).json({
+            sucesso: false,
+            erro: mensagemErro,
+            detalhes: error.code || ''
+        });
     }
 });
 

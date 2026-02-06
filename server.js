@@ -11,6 +11,9 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
 const axios = require('axios');
+const { google } = require('googleapis');
+const multer = require('multer');
+const multerUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
 dotenv.config();
 
@@ -557,6 +560,48 @@ async function initDatabase() {
         // Índice para buscar usuários por dentista
         try {
             await pool.query('CREATE INDEX IF NOT EXISTS idx_usuarios_vinc_dentista ON usuarios_vinculados(dentista_id)');
+        } catch (e) {}
+
+        // Tabela de conexões com storage externo (Google Drive, OneDrive)
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS storage_connections (
+                id SERIAL PRIMARY KEY,
+                dentista_id INTEGER NOT NULL REFERENCES dentistas(id) ON DELETE CASCADE,
+                provider VARCHAR(20) NOT NULL DEFAULT 'google_drive',
+                access_token TEXT NOT NULL,
+                refresh_token TEXT NOT NULL,
+                token_expiry TIMESTAMP,
+                google_email VARCHAR(255),
+                root_folder_id VARCHAR(255),
+                connected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(dentista_id, provider)
+            )
+        `);
+
+        // Tabela de arquivos de pacientes (referência ao Google Drive)
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS paciente_arquivos (
+                id SERIAL PRIMARY KEY,
+                paciente_id INTEGER NOT NULL REFERENCES pacientes(id) ON DELETE CASCADE,
+                dentista_id INTEGER NOT NULL REFERENCES dentistas(id) ON DELETE CASCADE,
+                provider VARCHAR(20) NOT NULL DEFAULT 'google_drive',
+                nome VARCHAR(500) NOT NULL,
+                tipo VARCHAR(100),
+                tamanho BIGINT DEFAULT 0,
+                categoria VARCHAR(50) DEFAULT 'documento',
+                drive_file_id VARCHAR(255) NOT NULL,
+                drive_folder_id VARCHAR(255),
+                view_url TEXT,
+                thumbnail_url TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
+        try {
+            await pool.query('CREATE INDEX IF NOT EXISTS idx_paciente_arquivos_paciente ON paciente_arquivos(paciente_id)');
+            await pool.query('CREATE INDEX IF NOT EXISTS idx_paciente_arquivos_dentista ON paciente_arquivos(dentista_id)');
         } catch (e) {}
 
         console.log('Banco de dados inicializado!');
@@ -4244,6 +4289,338 @@ app.post('/api/nfse/testar-conexao', authMiddleware, async (req, res) => {
             erro: mensagemErro,
             detalhes: error.code || ''
         });
+    }
+});
+
+// ==============================================================================
+// GOOGLE DRIVE STORAGE
+// ==============================================================================
+
+// Helper: criar cliente OAuth2 do Google
+function createGoogleOAuthClient() {
+    return new google.auth.OAuth2(
+        process.env.GOOGLE_CLIENT_ID,
+        process.env.GOOGLE_CLIENT_SECRET,
+        process.env.GOOGLE_REDIRECT_URI
+    );
+}
+
+// Helper: criar cliente autenticado a partir da conexão do dentista
+async function getAuthenticatedDrive(dentistaId) {
+    const conn = await pool.query(
+        'SELECT * FROM storage_connections WHERE dentista_id = $1 AND provider = $2',
+        [dentistaId, 'google_drive']
+    );
+    if (conn.rows.length === 0) return null;
+
+    const oauth2Client = createGoogleOAuthClient();
+    oauth2Client.setCredentials({
+        access_token: conn.rows[0].access_token,
+        refresh_token: conn.rows[0].refresh_token,
+        expiry_date: conn.rows[0].token_expiry ? new Date(conn.rows[0].token_expiry).getTime() : null
+    });
+
+    // Listener para salvar tokens renovados automaticamente
+    oauth2Client.on('tokens', async (tokens) => {
+        try {
+            const updates = [];
+            const values = [];
+            let idx = 1;
+            if (tokens.access_token) { updates.push(`access_token = $${idx++}`); values.push(tokens.access_token); }
+            if (tokens.refresh_token) { updates.push(`refresh_token = $${idx++}`); values.push(tokens.refresh_token); }
+            if (tokens.expiry_date) { updates.push(`token_expiry = $${idx++}`); values.push(new Date(tokens.expiry_date)); }
+            updates.push(`updated_at = $${idx++}`); values.push(new Date());
+            values.push(dentistaId);
+            await pool.query(
+                `UPDATE storage_connections SET ${updates.join(', ')} WHERE dentista_id = $${idx} AND provider = 'google_drive'`,
+                values
+            );
+        } catch (e) { console.error('Erro ao atualizar token:', e.message); }
+    });
+
+    return google.drive({ version: 'v3', auth: oauth2Client });
+}
+
+// Helper: garantir que existe pasta do paciente no Drive
+async function ensurePatientFolder(drive, rootFolderId, pacienteId, pacienteNome) {
+    const folderName = `Paciente_${pacienteId}_${(pacienteNome || '').replace(/[^a-zA-Z0-9]/g, '_')}`;
+
+    // Procurar pasta existente
+    const search = await drive.files.list({
+        q: `name='${folderName}' and '${rootFolderId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+        fields: 'files(id, name)',
+        spaces: 'drive'
+    });
+
+    if (search.data.files.length > 0) return search.data.files[0].id;
+
+    // Criar pasta
+    const folder = await drive.files.create({
+        requestBody: {
+            name: folderName,
+            mimeType: 'application/vnd.google-apps.folder',
+            parents: [rootFolderId]
+        },
+        fields: 'id'
+    });
+    return folder.data.id;
+}
+
+// 1) Iniciar OAuth - redireciona para Google
+app.get('/api/storage/connect/google', authMiddleware, (req, res) => {
+    const oauth2Client = createGoogleOAuthClient();
+    const url = oauth2Client.generateAuthUrl({
+        access_type: 'offline',
+        prompt: 'consent',
+        scope: [
+            'https://www.googleapis.com/auth/drive.file',
+            'https://www.googleapis.com/auth/userinfo.email'
+        ],
+        state: JSON.stringify({ dentistaId: req.dentistaId })
+    });
+    res.redirect(url);
+});
+
+// 2) Callback do OAuth
+app.get('/api/storage/callback/google', async (req, res) => {
+    try {
+        const { code, state } = req.query;
+        if (!code) return res.status(400).send('Código não fornecido');
+
+        const { dentistaId } = JSON.parse(state || '{}');
+        if (!dentistaId) return res.status(400).send('Estado inválido');
+
+        const oauth2Client = createGoogleOAuthClient();
+        const { tokens } = await oauth2Client.getToken(code);
+        oauth2Client.setCredentials(tokens);
+
+        // Pegar email do usuário
+        const oauth2 = google.oauth2({ version: 'v2', auth: oauth2Client });
+        const userInfo = await oauth2.userinfo.get();
+        const email = userInfo.data.email;
+
+        // Criar pasta raiz "Dental Ultra" no Drive
+        const drive = google.drive({ version: 'v3', auth: oauth2Client });
+        let rootFolderId;
+
+        const searchRoot = await drive.files.list({
+            q: "name='Dental Ultra' and mimeType='application/vnd.google-apps.folder' and trashed=false and 'root' in parents",
+            fields: 'files(id)',
+            spaces: 'drive'
+        });
+
+        if (searchRoot.data.files.length > 0) {
+            rootFolderId = searchRoot.data.files[0].id;
+        } else {
+            const newFolder = await drive.files.create({
+                requestBody: {
+                    name: 'Dental Ultra',
+                    mimeType: 'application/vnd.google-apps.folder'
+                },
+                fields: 'id'
+            });
+            rootFolderId = newFolder.data.id;
+        }
+
+        // Salvar conexão (upsert)
+        await pool.query(`
+            INSERT INTO storage_connections (dentista_id, provider, access_token, refresh_token, token_expiry, google_email, root_folder_id)
+            VALUES ($1, 'google_drive', $2, $3, $4, $5, $6)
+            ON CONFLICT (dentista_id, provider) DO UPDATE SET
+                access_token = $2, refresh_token = $3, token_expiry = $4,
+                google_email = $5, root_folder_id = $6, updated_at = NOW()
+        `, [dentistaId, tokens.access_token, tokens.refresh_token, tokens.expiry_date ? new Date(tokens.expiry_date) : null, email, rootFolderId]);
+
+        // Fechar popup e avisar o frontend
+        const frontendUrl = process.env.FRONTEND_URL || 'https://dentalultra.com.br/area-dentistas';
+        res.send(`
+            <html><body><script>
+                if (window.opener) {
+                    window.opener.postMessage({ type: 'google-drive-connected' }, '${frontendUrl}');
+                }
+                window.close();
+            </script><p>Google Drive conectado! Fechando...</p></body></html>
+        `);
+    } catch (error) {
+        console.error('Erro callback Google:', error.message);
+        res.status(500).send(`<html><body><h3>Erro ao conectar</h3><p>${error.message}</p></body></html>`);
+    }
+});
+
+// 3) Verificar status da conexão
+app.get('/api/storage/status', authMiddleware, async (req, res) => {
+    try {
+        const conn = await pool.query(
+            'SELECT id, provider, google_email, connected_at FROM storage_connections WHERE dentista_id = $1',
+            [req.dentistaId]
+        );
+
+        if (conn.rows.length === 0) {
+            return res.json({ success: true, connected: false });
+        }
+
+        // Tentar pegar uso do Drive
+        let usage = null;
+        try {
+            const drive = await getAuthenticatedDrive(req.dentistaId);
+            if (drive) {
+                const about = await drive.about.get({ fields: 'storageQuota' });
+                usage = {
+                    used: parseInt(about.data.storageQuota.usage || 0),
+                    total: parseInt(about.data.storageQuota.limit || 15 * 1024 * 1024 * 1024)
+                };
+            }
+        } catch (e) { /* silenciar erros de quota */ }
+
+        res.json({
+            success: true,
+            connected: true,
+            provider: conn.rows[0].provider,
+            email: conn.rows[0].google_email,
+            connected_at: conn.rows[0].connected_at,
+            usage
+        });
+    } catch (error) {
+        console.error('Erro storage status:', error.message);
+        res.status(500).json({ success: false, erro: error.message });
+    }
+});
+
+// 4) Desconectar
+app.post('/api/storage/disconnect', authMiddleware, async (req, res) => {
+    try {
+        await pool.query('DELETE FROM storage_connections WHERE dentista_id = $1', [req.dentistaId]);
+        res.json({ success: true });
+    } catch (error) {
+        res.status(500).json({ success: false, erro: error.message });
+    }
+});
+
+// 5) Upload de arquivo para Google Drive
+app.post('/api/storage/upload', authMiddleware, multerUpload.single('file'), async (req, res) => {
+    try {
+        const drive = await getAuthenticatedDrive(req.dentistaId);
+        if (!drive) return res.status(400).json({ success: false, erro: 'Google Drive não conectado' });
+
+        const { pacienteId, categoria } = req.body;
+        if (!pacienteId) return res.status(400).json({ success: false, erro: 'pacienteId obrigatório' });
+        if (!req.file) return res.status(400).json({ success: false, erro: 'Nenhum arquivo enviado' });
+
+        // Buscar nome do paciente e pasta raiz
+        const paciente = await pool.query('SELECT nome FROM pacientes WHERE id = $1 AND dentista_id = $2', [pacienteId, req.dentistaId]);
+        if (paciente.rows.length === 0) return res.status(404).json({ success: false, erro: 'Paciente não encontrado' });
+
+        const conn = await pool.query('SELECT root_folder_id FROM storage_connections WHERE dentista_id = $1 AND provider = $2', [req.dentistaId, 'google_drive']);
+        const rootFolderId = conn.rows[0].root_folder_id;
+
+        // Garantir pasta do paciente
+        const patientFolderId = await ensurePatientFolder(drive, rootFolderId, pacienteId, paciente.rows[0].nome);
+
+        // Upload para o Drive
+        const { Readable } = require('stream');
+        const fileStream = new Readable();
+        fileStream.push(req.file.buffer);
+        fileStream.push(null);
+
+        const driveFile = await drive.files.create({
+            requestBody: {
+                name: req.file.originalname,
+                parents: [patientFolderId]
+            },
+            media: {
+                mimeType: req.file.mimetype,
+                body: fileStream
+            },
+            fields: 'id, webViewLink, thumbnailLink'
+        });
+
+        // Salvar referência no banco
+        const result = await pool.query(`
+            INSERT INTO paciente_arquivos (paciente_id, dentista_id, provider, nome, tipo, tamanho, categoria, drive_file_id, drive_folder_id, view_url, thumbnail_url)
+            VALUES ($1, $2, 'google_drive', $3, $4, $5, $6, $7, $8, $9, $10)
+            RETURNING id
+        `, [pacienteId, req.dentistaId, req.file.originalname, req.file.mimetype, req.file.size,
+            categoria || 'documento', driveFile.data.id, patientFolderId,
+            driveFile.data.webViewLink || null, driveFile.data.thumbnailLink || null]);
+
+        res.json({
+            success: true,
+            arquivo: {
+                id: result.rows[0].id,
+                nome: req.file.originalname,
+                drive_file_id: driveFile.data.id,
+                view_url: driveFile.data.webViewLink
+            }
+        });
+    } catch (error) {
+        console.error('Erro upload storage:', error.message);
+        res.status(500).json({ success: false, erro: error.message });
+    }
+});
+
+// 6) Listar arquivos de um paciente
+app.get('/api/storage/files/:pacienteId', authMiddleware, async (req, res) => {
+    try {
+        const { pacienteId } = req.params;
+        const result = await pool.query(
+            'SELECT * FROM paciente_arquivos WHERE paciente_id = $1 AND dentista_id = $2 ORDER BY created_at DESC',
+            [pacienteId, req.dentistaId]
+        );
+        res.json({ success: true, files: result.rows });
+    } catch (error) {
+        res.status(500).json({ success: false, erro: error.message });
+    }
+});
+
+// 7) Download de arquivo (proxy pelo backend)
+app.get('/api/storage/download/:id', authMiddleware, async (req, res) => {
+    try {
+        const arquivo = await pool.query(
+            'SELECT * FROM paciente_arquivos WHERE id = $1 AND dentista_id = $2',
+            [req.params.id, req.dentistaId]
+        );
+        if (arquivo.rows.length === 0) return res.status(404).json({ success: false, erro: 'Arquivo não encontrado' });
+
+        const drive = await getAuthenticatedDrive(req.dentistaId);
+        if (!drive) return res.status(400).json({ success: false, erro: 'Drive não conectado' });
+
+        const arq = arquivo.rows[0];
+        const driveRes = await drive.files.get(
+            { fileId: arq.drive_file_id, alt: 'media' },
+            { responseType: 'stream' }
+        );
+
+        res.setHeader('Content-Type', arq.tipo || 'application/octet-stream');
+        res.setHeader('Content-Disposition', `attachment; filename="${arq.nome}"`);
+        driveRes.data.pipe(res);
+    } catch (error) {
+        console.error('Erro download storage:', error.message);
+        res.status(500).json({ success: false, erro: error.message });
+    }
+});
+
+// 8) Excluir arquivo
+app.delete('/api/storage/files/:id', authMiddleware, async (req, res) => {
+    try {
+        const arquivo = await pool.query(
+            'SELECT * FROM paciente_arquivos WHERE id = $1 AND dentista_id = $2',
+            [req.params.id, req.dentistaId]
+        );
+        if (arquivo.rows.length === 0) return res.status(404).json({ success: false, erro: 'Arquivo não encontrado' });
+
+        // Excluir do Drive
+        try {
+            const drive = await getAuthenticatedDrive(req.dentistaId);
+            if (drive) {
+                await drive.files.delete({ fileId: arquivo.rows[0].drive_file_id });
+            }
+        } catch (e) { console.error('Aviso: não deletou do Drive:', e.message); }
+
+        // Excluir do banco
+        await pool.query('DELETE FROM paciente_arquivos WHERE id = $1', [req.params.id]);
+        res.json({ success: true });
+    } catch (error) {
+        res.status(500).json({ success: false, erro: error.message });
     }
 });
 

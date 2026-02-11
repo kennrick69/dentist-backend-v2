@@ -3139,13 +3139,16 @@ app.patch('/api/odontograma-geral/:pacienteId/dente', authMiddleware, async (req
             [dentistaId, pacienteId]
         );
         let dados = result.rows[0]?.dados || {};
-        dados[dente] = dadosDente; // substitui SÓ aquele dente
+        let faces = dados.faces || dados;
+        let nodes = dados.nodes || {};
+        faces[dente] = dadosDente; // substitui SÓ aquele dente
+        const newDados = { faces, nodes };
         await pool.query(`
             INSERT INTO odontograma_geral (dentista_id, paciente_id, dados)
             VALUES ($1, $2, $3)
             ON CONFLICT (dentista_id, paciente_id) DO UPDATE SET
                 dados = $3, atualizado_em = NOW()
-        `, [dentistaId, pacienteId, JSON.stringify(dados)]);
+        `, [dentistaId, pacienteId, JSON.stringify(newDados)]);
         res.json({ success: true, message: 'Dente atualizado no geral' });
     } catch (error) {
         console.error('Erro patch dente:', error);
@@ -3257,6 +3260,9 @@ app.put('/api/plano-tratamento/itens/:itemId/realizar', authMiddleware, async (r
                 [dentistaId, pacienteId]
             );
             let dados = geralResult.rows[0]?.dados || {};
+            // Support both old format (flat) and new format ({faces, nodes})
+            let faces = dados.faces || dados;
+            let nodes = dados.nodes || {};
             // Mapear procedimento → condição do odontograma
             const procMap = {
                 'restauração': 'restauracao', 'restauracao': 'restauracao', 'canal': 'endo',
@@ -3268,18 +3274,19 @@ app.put('/api/plano-tratamento/itens/:itemId/realizar', authMiddleware, async (r
             const procLower = (item.procedimento || '').toLowerCase();
             let newCond = procMap[procLower] || 'restauracao';
             if (newCond === 'ausente') {
-                dados[item.dente] = { ausente: true };
+                faces[item.dente] = { ausente: true };
             } else {
-                if (!dados[item.dente]) dados[item.dente] = {};
-                if (dados[item.dente].ausente) delete dados[item.dente].ausente;
-                const faces = (item.face || 'O').split(',');
-                faces.forEach(f => { dados[item.dente][f.trim()] = newCond; });
+                if (!faces[item.dente]) faces[item.dente] = {};
+                if (faces[item.dente].ausente) delete faces[item.dente].ausente;
+                const faceList = (item.face || 'O').split(',');
+                faceList.forEach(f => { faces[item.dente][f.trim()] = newCond; });
             }
+            const newDados = { faces, nodes };
             await pool.query(`
                 INSERT INTO odontograma_geral (dentista_id, paciente_id, dados)
                 VALUES ($1, $2, $3)
                 ON CONFLICT (dentista_id, paciente_id) DO UPDATE SET dados = $3, atualizado_em = NOW()
-            `, [dentistaId, pacienteId, JSON.stringify(dados)]);
+            `, [dentistaId, pacienteId, JSON.stringify(newDados)]);
         }
         res.json({ success: true, message: realizado ? 'Procedimento realizado!' : 'Desmarcado' });
     } catch (error) {

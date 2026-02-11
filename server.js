@@ -674,6 +674,79 @@ async function initDatabase() {
             )
         `);
         console.log('Tabelas anamnese/receitas/atestados criadas!');
+
+        // Tabelas Odontograma Geral + Plano de Tratamento + Orçamentos + Tabela de Preços
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS odontograma_geral (
+                id SERIAL PRIMARY KEY,
+                dentista_id INTEGER REFERENCES dentistas(id) ON DELETE CASCADE,
+                paciente_id INTEGER REFERENCES pacientes(id) ON DELETE CASCADE,
+                dados JSONB NOT NULL DEFAULT '{}',
+                criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(dentista_id, paciente_id)
+            )
+        `);
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS plano_tratamento (
+                id SERIAL PRIMARY KEY,
+                dentista_id INTEGER REFERENCES dentistas(id) ON DELETE CASCADE,
+                paciente_id INTEGER REFERENCES pacientes(id) ON DELETE CASCADE,
+                status VARCHAR(20) DEFAULT 'ativo',
+                criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS plano_tratamento_itens (
+                id SERIAL PRIMARY KEY,
+                plano_id INTEGER REFERENCES plano_tratamento(id) ON DELETE CASCADE,
+                dente VARCHAR(10),
+                face VARCHAR(20),
+                procedimento VARCHAR(255) NOT NULL,
+                descricao TEXT,
+                posicao INTEGER,
+                realizado BOOLEAN DEFAULT FALSE,
+                realizado_em TIMESTAMP,
+                origem VARCHAR(20) DEFAULT 'odontograma',
+                criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS orcamentos (
+                id SERIAL PRIMARY KEY,
+                dentista_id INTEGER REFERENCES dentistas(id) ON DELETE CASCADE,
+                paciente_id INTEGER REFERENCES pacientes(id) ON DELETE CASCADE,
+                status VARCHAR(30) DEFAULT 'aberto',
+                validade_dias INTEGER DEFAULT 30,
+                forma_pagamento VARCHAR(100),
+                observacoes TEXT,
+                total DECIMAL(10,2) DEFAULT 0,
+                criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS orcamento_itens (
+                id SERIAL PRIMARY KEY,
+                orcamento_id INTEGER REFERENCES orcamentos(id) ON DELETE CASCADE,
+                dente VARCHAR(10),
+                procedimento VARCHAR(255) NOT NULL,
+                valor DECIMAL(10,2) DEFAULT 0,
+                aprovado BOOLEAN DEFAULT FALSE
+            )
+        `);
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS tabela_precos (
+                id SERIAL PRIMARY KEY,
+                dentista_id INTEGER REFERENCES dentistas(id) ON DELETE CASCADE,
+                procedimento VARCHAR(255) NOT NULL,
+                valor DECIMAL(10,2) NOT NULL,
+                ativo BOOLEAN DEFAULT TRUE,
+                criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        console.log('Tabelas novos módulos criadas!');
     } catch (error) {
         console.error('Erro ao inicializar banco:', error.message);
     }
@@ -3021,8 +3094,373 @@ app.delete('/api/atestados/:id', authMiddleware, async (req, res) => {
 });
 
 // ==============================================================================
-// ROTAS DE FINANCEIRO
+// ROTAS DE ODONTOGRAMA GERAL — ESTADO ATUAL
 // ==============================================================================
+
+app.get('/api/odontograma-geral/:pacienteId', authMiddleware, async (req, res) => {
+    try {
+        const result = await pool.query(
+            'SELECT * FROM odontograma_geral WHERE dentista_id = $1 AND paciente_id = $2',
+            [parseInt(req.user.id), parseInt(req.params.pacienteId)]
+        );
+        res.json({ success: true, odontograma: result.rows[0] || null });
+    } catch (error) {
+        console.error('Erro odontograma geral GET:', error);
+        res.status(500).json({ success: false, erro: 'Erro ao buscar odontograma geral' });
+    }
+});
+
+app.post('/api/odontograma-geral', authMiddleware, async (req, res) => {
+    try {
+        const { pacienteId, dados } = req.body;
+        const result = await pool.query(`
+            INSERT INTO odontograma_geral (dentista_id, paciente_id, dados)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (dentista_id, paciente_id) DO UPDATE SET
+                dados = EXCLUDED.dados, atualizado_em = NOW()
+            RETURNING id
+        `, [parseInt(req.user.id), parseInt(pacienteId), JSON.stringify(dados)]);
+        res.json({ success: true, message: 'Odontograma geral salvo!', id: result.rows[0].id });
+    } catch (error) {
+        console.error('Erro odontograma geral POST:', error);
+        res.status(500).json({ success: false, erro: 'Erro ao salvar odontograma geral' });
+    }
+});
+
+// Atualizar dente específico no geral (merge parcial)
+app.patch('/api/odontograma-geral/:pacienteId/dente', authMiddleware, async (req, res) => {
+    try {
+        const { dente, dadosDente } = req.body;
+        const dentistaId = parseInt(req.user.id);
+        const pacienteId = parseInt(req.params.pacienteId);
+        // Buscar dados atuais
+        let result = await pool.query(
+            'SELECT dados FROM odontograma_geral WHERE dentista_id = $1 AND paciente_id = $2',
+            [dentistaId, pacienteId]
+        );
+        let dados = result.rows[0]?.dados || {};
+        dados[dente] = dadosDente; // substitui SÓ aquele dente
+        await pool.query(`
+            INSERT INTO odontograma_geral (dentista_id, paciente_id, dados)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (dentista_id, paciente_id) DO UPDATE SET
+                dados = $3, atualizado_em = NOW()
+        `, [dentistaId, pacienteId, JSON.stringify(dados)]);
+        res.json({ success: true, message: 'Dente atualizado no geral' });
+    } catch (error) {
+        console.error('Erro patch dente:', error);
+        res.status(500).json({ success: false, erro: 'Erro ao atualizar dente' });
+    }
+});
+
+// ==============================================================================
+// ROTAS DE PLANO DE TRATAMENTO
+// ==============================================================================
+
+app.get('/api/plano-tratamento/:pacienteId', authMiddleware, async (req, res) => {
+    try {
+        const plano = await pool.query(
+            'SELECT * FROM plano_tratamento WHERE dentista_id = $1 AND paciente_id = $2 AND status = $3 ORDER BY criado_em DESC LIMIT 1',
+            [parseInt(req.user.id), parseInt(req.params.pacienteId), 'ativo']
+        );
+        if (plano.rows.length === 0) return res.json({ success: true, plano: null, itens: [] });
+        const itens = await pool.query(
+            'SELECT * FROM plano_tratamento_itens WHERE plano_id = $1 ORDER BY posicao ASC NULLS LAST, criado_em ASC',
+            [plano.rows[0].id]
+        );
+        res.json({
+            success: true,
+            plano: { id: plano.rows[0].id, status: plano.rows[0].status, criadoEm: plano.rows[0].criado_em },
+            itens: itens.rows.map(i => ({
+                id: i.id, dente: i.dente, face: i.face, procedimento: i.procedimento,
+                descricao: i.descricao, posicao: i.posicao, realizado: i.realizado,
+                realizadoEm: i.realizado_em, origem: i.origem
+            }))
+        });
+    } catch (error) {
+        console.error('Erro plano GET:', error);
+        res.status(500).json({ success: false, erro: 'Erro ao buscar plano' });
+    }
+});
+
+app.post('/api/plano-tratamento', authMiddleware, async (req, res) => {
+    try {
+        const { pacienteId, itens } = req.body;
+        const dentistaId = parseInt(req.user.id);
+        // Criar plano
+        const plano = await pool.query(
+            'INSERT INTO plano_tratamento (dentista_id, paciente_id) VALUES ($1, $2) RETURNING id',
+            [dentistaId, parseInt(pacienteId)]
+        );
+        const planoId = plano.rows[0].id;
+        // Inserir itens
+        for (const item of (itens || [])) {
+            await pool.query(
+                'INSERT INTO plano_tratamento_itens (plano_id, dente, face, procedimento, descricao, posicao, origem) VALUES ($1,$2,$3,$4,$5,$6,$7)',
+                [planoId, item.dente, item.face, item.procedimento, item.descricao, item.posicao, item.origem || 'odontograma']
+            );
+        }
+        res.status(201).json({ success: true, message: 'Plano criado!', planoId });
+    } catch (error) {
+        console.error('Erro plano POST:', error);
+        res.status(500).json({ success: false, erro: 'Erro ao criar plano' });
+    }
+});
+
+// Atualizar posições dos itens (drag-drop reorder)
+app.put('/api/plano-tratamento/:planoId/reordenar', authMiddleware, async (req, res) => {
+    try {
+        const { itens } = req.body; // [{ id, posicao }]
+        for (const item of itens) {
+            await pool.query('UPDATE plano_tratamento_itens SET posicao = $1 WHERE id = $2', [item.posicao, item.id]);
+        }
+        res.json({ success: true, message: 'Reordenado!' });
+    } catch (error) {
+        res.status(500).json({ success: false, erro: 'Erro ao reordenar' });
+    }
+});
+
+// Adicionar item manual ao plano
+app.post('/api/plano-tratamento/:planoId/itens', authMiddleware, async (req, res) => {
+    try {
+        const { dente, face, procedimento, descricao, posicao } = req.body;
+        const result = await pool.query(
+            'INSERT INTO plano_tratamento_itens (plano_id, dente, face, procedimento, descricao, posicao, origem) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id',
+            [parseInt(req.params.planoId), dente, face, procedimento, descricao, posicao, 'manual']
+        );
+        res.status(201).json({ success: true, item: { id: result.rows[0].id } });
+    } catch (error) {
+        res.status(500).json({ success: false, erro: 'Erro ao adicionar item' });
+    }
+});
+
+// Marcar item como realizado (atualiza odontograma geral)
+app.put('/api/plano-tratamento/itens/:itemId/realizar', authMiddleware, async (req, res) => {
+    try {
+        const { realizado } = req.body;
+        const dentistaId = parseInt(req.user.id);
+        // Atualizar item
+        const result = await pool.query(
+            'UPDATE plano_tratamento_itens SET realizado = $1, realizado_em = $2 WHERE id = $3 RETURNING *',
+            [realizado, realizado ? new Date() : null, parseInt(req.params.itemId)]
+        );
+        const item = result.rows[0];
+        if (!item) return res.status(404).json({ success: false, erro: 'Item não encontrado' });
+
+        // Se marcou como realizado E tem dente, atualizar odontograma geral
+        if (realizado && item.dente) {
+            const plano = await pool.query('SELECT paciente_id FROM plano_tratamento WHERE id = $1', [item.plano_id]);
+            const pacienteId = plano.rows[0].paciente_id;
+            // Buscar geral atual
+            let geralResult = await pool.query(
+                'SELECT dados FROM odontograma_geral WHERE dentista_id = $1 AND paciente_id = $2',
+                [dentistaId, pacienteId]
+            );
+            let dados = geralResult.rows[0]?.dados || {};
+            // Mapear procedimento → condição do odontograma
+            const procMap = {
+                'restauração': 'restauracao', 'restauracao': 'restauracao', 'canal': 'endo',
+                'tratamento de canal': 'endo', 'endodontia': 'endo', 'extração': 'ausente',
+                'extracao': 'ausente', 'prótese': 'protese', 'protese': 'protese',
+                'faceta': 'restauracao', 'coroa': 'protese', 'implante': 'protese',
+                'selante': 'selante', 'clareamento': 'restauracao'
+            };
+            const procLower = (item.procedimento || '').toLowerCase();
+            let newCond = procMap[procLower] || 'restauracao';
+            if (newCond === 'ausente') {
+                dados[item.dente] = { ausente: true };
+            } else {
+                if (!dados[item.dente]) dados[item.dente] = {};
+                if (dados[item.dente].ausente) delete dados[item.dente].ausente;
+                const faces = (item.face || 'O').split(',');
+                faces.forEach(f => { dados[item.dente][f.trim()] = newCond; });
+            }
+            await pool.query(`
+                INSERT INTO odontograma_geral (dentista_id, paciente_id, dados)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (dentista_id, paciente_id) DO UPDATE SET dados = $3, atualizado_em = NOW()
+            `, [dentistaId, pacienteId, JSON.stringify(dados)]);
+        }
+        res.json({ success: true, message: realizado ? 'Procedimento realizado!' : 'Desmarcado' });
+    } catch (error) {
+        console.error('Erro realizar item:', error);
+        res.status(500).json({ success: false, erro: 'Erro ao atualizar item' });
+    }
+});
+
+app.delete('/api/plano-tratamento/itens/:itemId', authMiddleware, async (req, res) => {
+    try {
+        await pool.query('DELETE FROM plano_tratamento_itens WHERE id = $1', [parseInt(req.params.itemId)]);
+        res.json({ success: true, message: 'Item removido' });
+    } catch (error) {
+        res.status(500).json({ success: false, erro: 'Erro ao remover item' });
+    }
+});
+
+// ==============================================================================
+// ROTAS DE ORÇAMENTOS
+// ==============================================================================
+
+app.get('/api/orcamentos', authMiddleware, async (req, res) => {
+    try {
+        const { pacienteId, status } = req.query;
+        let query = `SELECT o.*, p.nome as paciente_nome, d.name as dentista_nome, d.cro as dentista_cro
+            FROM orcamentos o
+            LEFT JOIN pacientes p ON o.paciente_id = p.id
+            LEFT JOIN dentistas d ON o.dentista_id = d.id
+            WHERE o.dentista_id = $1`;
+        const params = [parseInt(req.user.id)];
+        if (pacienteId) { query += ` AND o.paciente_id = $${params.length + 1}`; params.push(parseInt(pacienteId)); }
+        if (status) { query += ` AND o.status = $${params.length + 1}`; params.push(status); }
+        query += ' ORDER BY o.criado_em DESC';
+        const result = await pool.query(query, params);
+        const orcamentos = result.rows.map(o => ({
+            id: o.id, status: o.status, total: parseFloat(o.total), validadeDias: o.validade_dias,
+            formaPagamento: o.forma_pagamento, observacoes: o.observacoes, criadoEm: o.criado_em,
+            pacienteId: o.paciente_id, pacienteNome: o.paciente_nome,
+            dentistaNome: o.dentista_nome, dentistaCro: o.dentista_cro
+        }));
+        res.json({ success: true, orcamentos });
+    } catch (error) {
+        console.error('Erro orcamentos GET:', error);
+        res.status(500).json({ success: false, erro: 'Erro ao buscar orçamentos' });
+    }
+});
+
+app.get('/api/orcamentos/:id', authMiddleware, async (req, res) => {
+    try {
+        const orc = await pool.query(`
+            SELECT o.*, p.nome as paciente_nome, p.celular as paciente_celular, p.cpf as paciente_cpf,
+                   d.name as dentista_nome, d.cro as dentista_cro
+            FROM orcamentos o
+            LEFT JOIN pacientes p ON o.paciente_id = p.id
+            LEFT JOIN dentistas d ON o.dentista_id = d.id
+            WHERE o.id = $1 AND o.dentista_id = $2`, [parseInt(req.params.id), parseInt(req.user.id)]);
+        if (orc.rows.length === 0) return res.status(404).json({ success: false, erro: 'Orçamento não encontrado' });
+        const itens = await pool.query('SELECT * FROM orcamento_itens WHERE orcamento_id = $1 ORDER BY id', [parseInt(req.params.id)]);
+        const o = orc.rows[0];
+        res.json({
+            success: true,
+            orcamento: {
+                id: o.id, status: o.status, total: parseFloat(o.total), validadeDias: o.validade_dias,
+                formaPagamento: o.forma_pagamento, observacoes: o.observacoes, criadoEm: o.criado_em,
+                pacienteId: o.paciente_id, pacienteNome: o.paciente_nome,
+                pacienteCelular: o.paciente_celular, pacienteCpf: o.paciente_cpf,
+                dentistaNome: o.dentista_nome, dentistaCro: o.dentista_cro
+            },
+            itens: itens.rows.map(i => ({ id: i.id, dente: i.dente, procedimento: i.procedimento, valor: parseFloat(i.valor), aprovado: i.aprovado }))
+        });
+    } catch (error) {
+        console.error('Erro orcamento detalhe:', error);
+        res.status(500).json({ success: false, erro: 'Erro ao buscar orçamento' });
+    }
+});
+
+app.post('/api/orcamentos', authMiddleware, async (req, res) => {
+    try {
+        const { pacienteId, itens, validadeDias, formaPagamento, observacoes } = req.body;
+        const total = (itens || []).reduce((s, i) => s + (parseFloat(i.valor) || 0), 0);
+        const orc = await pool.query(
+            `INSERT INTO orcamentos (dentista_id, paciente_id, total, validade_dias, forma_pagamento, observacoes)
+             VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
+            [parseInt(req.user.id), parseInt(pacienteId), total, validadeDias || 30, formaPagamento, observacoes]
+        );
+        const orcId = orc.rows[0].id;
+        for (const item of (itens || [])) {
+            await pool.query(
+                'INSERT INTO orcamento_itens (orcamento_id, dente, procedimento, valor) VALUES ($1,$2,$3,$4)',
+                [orcId, item.dente, item.procedimento, item.valor || 0]
+            );
+        }
+        res.status(201).json({ success: true, message: 'Orçamento criado!', orcamentoId: orcId });
+    } catch (error) {
+        console.error('Erro orcamento POST:', error);
+        res.status(500).json({ success: false, erro: 'Erro ao criar orçamento' });
+    }
+});
+
+app.put('/api/orcamentos/:id', authMiddleware, async (req, res) => {
+    try {
+        const { status, formaPagamento, observacoes, itensAprovados } = req.body;
+        if (status) await pool.query('UPDATE orcamentos SET status=$1, atualizado_em=NOW() WHERE id=$2 AND dentista_id=$3', [status, parseInt(req.params.id), parseInt(req.user.id)]);
+        if (formaPagamento !== undefined) await pool.query('UPDATE orcamentos SET forma_pagamento=$1, atualizado_em=NOW() WHERE id=$2', [formaPagamento, parseInt(req.params.id)]);
+        if (observacoes !== undefined) await pool.query('UPDATE orcamentos SET observacoes=$1, atualizado_em=NOW() WHERE id=$2', [observacoes, parseInt(req.params.id)]);
+        if (itensAprovados) {
+            for (const ia of itensAprovados) {
+                await pool.query('UPDATE orcamento_itens SET aprovado=$1 WHERE id=$2', [ia.aprovado, ia.id]);
+            }
+            // Recalcular total aprovado
+            const itens = await pool.query('SELECT * FROM orcamento_itens WHERE orcamento_id = $1', [parseInt(req.params.id)]);
+            const todoAprovado = itens.rows.every(i => i.aprovado);
+            const algumAprovado = itens.rows.some(i => i.aprovado);
+            const novoStatus = todoAprovado ? 'aprovado_total' : algumAprovado ? 'aprovado_parcial' : 'aberto';
+            await pool.query('UPDATE orcamentos SET status=$1, atualizado_em=NOW() WHERE id=$2', [novoStatus, parseInt(req.params.id)]);
+        }
+        res.json({ success: true, message: 'Orçamento atualizado!' });
+    } catch (error) {
+        console.error('Erro orcamento PUT:', error);
+        res.status(500).json({ success: false, erro: 'Erro ao atualizar' });
+    }
+});
+
+app.delete('/api/orcamentos/:id', authMiddleware, async (req, res) => {
+    try {
+        await pool.query('DELETE FROM orcamento_itens WHERE orcamento_id = $1', [parseInt(req.params.id)]);
+        await pool.query('DELETE FROM orcamentos WHERE id = $1 AND dentista_id = $2', [parseInt(req.params.id), parseInt(req.user.id)]);
+        res.json({ success: true, message: 'Orçamento removido' });
+    } catch (error) {
+        res.status(500).json({ success: false, erro: 'Erro ao remover' });
+    }
+});
+
+// ==============================================================================
+// ROTAS DE TABELA DE PREÇOS
+// ==============================================================================
+
+app.get('/api/tabela-precos', authMiddleware, async (req, res) => {
+    try {
+        const result = await pool.query(
+            'SELECT * FROM tabela_precos WHERE dentista_id = $1 AND ativo = true ORDER BY procedimento ASC',
+            [parseInt(req.user.id)]
+        );
+        res.json({ success: true, precos: result.rows.map(p => ({ id: p.id, procedimento: p.procedimento, valor: parseFloat(p.valor) })) });
+    } catch (error) {
+        res.status(500).json({ success: false, erro: 'Erro ao buscar preços' });
+    }
+});
+
+app.post('/api/tabela-precos', authMiddleware, async (req, res) => {
+    try {
+        const { procedimento, valor } = req.body;
+        const result = await pool.query(
+            'INSERT INTO tabela_precos (dentista_id, procedimento, valor) VALUES ($1,$2,$3) RETURNING id',
+            [parseInt(req.user.id), procedimento, valor]
+        );
+        res.status(201).json({ success: true, preco: { id: result.rows[0].id } });
+    } catch (error) {
+        res.status(500).json({ success: false, erro: 'Erro ao salvar preço' });
+    }
+});
+
+app.put('/api/tabela-precos/:id', authMiddleware, async (req, res) => {
+    try {
+        const { procedimento, valor } = req.body;
+        await pool.query('UPDATE tabela_precos SET procedimento=$1, valor=$2 WHERE id=$3 AND dentista_id=$4',
+            [procedimento, valor, parseInt(req.params.id), parseInt(req.user.id)]);
+        res.json({ success: true, message: 'Preço atualizado' });
+    } catch (error) {
+        res.status(500).json({ success: false, erro: 'Erro ao atualizar' });
+    }
+});
+
+app.delete('/api/tabela-precos/:id', authMiddleware, async (req, res) => {
+    try {
+        await pool.query('UPDATE tabela_precos SET ativo=false WHERE id=$1 AND dentista_id=$2', [parseInt(req.params.id), parseInt(req.user.id)]);
+        res.json({ success: true, message: 'Preço removido' });
+    } catch (error) {
+        res.status(500).json({ success: false, erro: 'Erro ao remover' });
+    }
+});
 
 app.get('/api/financeiro', authMiddleware, async (req, res) => {
     try {

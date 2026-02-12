@@ -10,10 +10,12 @@ const dotenv = require('dotenv');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
-const axios = require('axios');
-const { google } = require('googleapis');
-const multer = require('multer');
-const multerUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+
+// Dependências opcionais — servidor inicia normalmente sem elas
+let axios, google, multer, multerUpload;
+try { axios = require('axios'); } catch(e) { console.log('⚠️ axios não instalado — emails desativados'); }
+try { const g = require('googleapis'); google = g.google; } catch(e) { console.log('⚠️ googleapis não instalado — Google Drive desativado'); }
+try { multer = require('multer'); multerUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } }); } catch(e) { console.log('⚠️ multer não instalado — uploads desativados'); }
 
 dotenv.config();
 
@@ -1369,10 +1371,41 @@ app.get('/api/dentistas', authMiddleware, async (req, res) => {
     }
 });
 
+// Buscar dados do dentista logado (DEVE vir antes de /:id)
+app.get('/api/dentistas/me', authMiddleware, async (req, res) => {
+    try {
+        const result = await pool.query(
+            'SELECT id, name, cro, email, clinic, specialty, subscription_plan, subscription_active FROM dentistas WHERE id = $1',
+            [parseInt(req.user.id)]
+        );
+        if (result.rows.length === 0) {
+            return res.status(404).json({ success: false, erro: 'Dentista não encontrado' });
+        }
+        const d = result.rows[0];
+        res.json({
+            success: true,
+            id: d.id.toString(),
+            nome: d.name,
+            cro: d.cro,
+            email: d.email,
+            clinica: d.clinic,
+            especialidade: d.specialty,
+            plano: d.subscription_plan,
+            planoAtivo: d.subscription_active
+        });
+    } catch (error) {
+        console.error('Erro ao buscar dentista /me:', error);
+        res.status(500).json({ success: false, erro: 'Erro ao buscar dados' });
+    }
+});
+
 // Buscar profissional por ID
 app.get('/api/dentistas/:id', authMiddleware, async (req, res) => {
     try {
         const { id } = req.params;
+        if (isNaN(parseInt(id))) {
+            return res.status(400).json({ erro: 'ID inválido' });
+        }
         const result = await pool.query(
             'SELECT * FROM profissionais WHERE id = $1 AND dentista_id = $2 AND ativo = true',
             [parseInt(id), parseInt(req.user.id)]
@@ -5276,6 +5309,7 @@ app.delete('/api/prefeituras/:id', authMiddleware, async (req, res) => {
 // ==============================================================================
 
 app.post('/api/nfse/testar-conexao', authMiddleware, async (req, res) => {
+    if (!axios) return res.status(501).json({ sucesso: false, erro: 'Módulo axios não instalado no servidor' });
     const { url_webservice, cpf_cnpj_prestador, senha_webservice } = req.body;
     
     if (!url_webservice || !cpf_cnpj_prestador || !senha_webservice) {
@@ -5396,8 +5430,9 @@ app.post('/api/nfse/testar-conexao', authMiddleware, async (req, res) => {
 });
 
 // ==============================================================================
-// GOOGLE DRIVE STORAGE
+// GOOGLE DRIVE STORAGE (só carrega se googleapis estiver instalado)
 // ==============================================================================
+if (google) {
 
 // Helper: criar cliente OAuth2 do Google
 function createGoogleOAuthClient() {
@@ -5726,6 +5761,8 @@ app.delete('/api/storage/files/:id', authMiddleware, async (req, res) => {
         res.status(500).json({ success: false, erro: error.message });
     }
 });
+
+} // fim if (google) — Google Drive
 
 // ==============================================================================
 // ROTAS UTILITÁRIAS

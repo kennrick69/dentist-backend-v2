@@ -50,6 +50,14 @@ const pool = new Pool({
     ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
+pool.query("SET timezone = 'America/Sao_Paulo'", (err) => {
+    if (err) console.error('Erro ao definir timezone:', err.message);
+});
+
+pool.on('connect', (client) => {
+    client.query("SET timezone = 'America/Sao_Paulo'");
+});
+
 pool.query('SELECT NOW()', (err, res) => {
     if (err) {
         console.error('Erro PostgreSQL:', err.message);

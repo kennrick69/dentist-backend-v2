@@ -3804,7 +3804,7 @@ app.put('/api/casos-proteticos/:id/status', authMiddleware, async (req, res) => 
         const { id } = req.params;
         const { status, observacao, valorCusto } = req.body;
 
-        const statusValidos = ['criado', 'aguardando_envio', 'enviado_lab', 'em_design', 'em_producao', 'em_acabamento', 'em_transporte', 'recebido_clinica', 'prova_clinica', 'ajuste_solicitado', 'retrabalho', 'finalizado', 'cancelado'];
+        const statusValidos = ['criado', 'aguardando_envio', 'enviado_lab', 'em_design', 'em_producao', 'em_acabamento', 'em_transporte', 'recebido_clinica', 'prova_clinica', 'ajuste_solicitado', 'retrabalho', 'devolvido', 'finalizado', 'cancelado'];
 
         if (!statusValidos.includes(status)) {
             return res.status(400).json({ success: false, erro: 'Status inválido' });
